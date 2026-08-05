@@ -1,655 +1,109 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { calculateBalances, summarizeHousehold } from "./lib/expense";
-import { createHouseholdKey, mergeRecentHouseholds } from "./lib/household";
-import { loadHouseholdSnapshot, PROFILE_STORAGE_KEY, saveHouseholdSnapshot } from "./lib/persistence";
-import { initialExpenses, members, type Expense } from "./lib/sampleData";
+import { useEffect, useState } from "react";
 
-type Balance = {
-  member: string;
-  net: number;
-};
+type Role = "owner" | "member";
+type Member = { id: string; name: string; mobile: string; role: Role; active: boolean };
+type Expense = { id: string; title: string; amount: number; category: string; date: string; paidBy: string; createdBy: string };
+type Settlement = { id: string; from: string; to: string; amount: number; date: string };
+type House = { id: string; name: string; pin: string; ownerId: string; members: Member[]; expenses: Expense[]; settlements: Settlement[] };
+type Session = { houseId: string; memberId: string };
 
-const createExpenseId = () =>
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const HOUSES_KEY = "nestsplit-houses-v2";
+const SESSION_KEY = "nestsplit-session-v2";
+const currency = (amount: number) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(amount || 0);
+const uid = () => typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const houseCode = () => `NS-${Math.random().toString(36).slice(2, 6).toUpperCase()}${Math.floor(10 + Math.random() * 90)}`;
+const today = () => new Date().toISOString().slice(0, 10);
 
-export default function Home() {
-  const [expenses, setExpenses] = useState<Expense[]>(initialExpenses);
-  const [houseMembers, setHouseMembers] = useState<string[]>(members);
-  const [isHydrated, setIsHydrated] = useState(false);
-  const [accountName, setAccountName] = useState("Shail");
-  const [householdName, setHouseholdName] = useState("The Nest");
-  const [recentHouseholds, setRecentHouseholds] = useState<Array<{ accountName: string; householdName: string; key: string }>>([]);
-  const [activeHouseholdKey, setActiveHouseholdKey] = useState(() =>
-    createHouseholdKey({ userId: "Shail", householdName: "The Nest" }),
-  );
-  const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState("Food");
-  const [expenseDate, setExpenseDate] = useState(new Date().toISOString().slice(0, 10));
-  const [payer, setPayer] = useState(members[0]);
-  const [memberName, setMemberName] = useState("");
-  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
-  const [editTitle, setEditTitle] = useState("");
-  const [editAmount, setEditAmount] = useState("");
-  const [editCategory, setEditCategory] = useState("Food");
-  const [editDate, setEditDate] = useState(new Date().toISOString().slice(0, 10));
-  const [editPayer, setEditPayer] = useState(members[0]);
+function getBalances(house: House) {
+  const active = house.members.filter((member) => member.active);
+  const totals = Object.fromEntries(active.map((member) => [member.id, 0]));
+  house.expenses.forEach((expense) => {
+    const share = active.length ? expense.amount / active.length : 0;
+    totals[expense.paidBy] = (totals[expense.paidBy] || 0) + expense.amount;
+    active.forEach((member) => { totals[member.id] -= share; });
+  });
+  house.settlements.forEach((settlement) => {
+    totals[settlement.from] = (totals[settlement.from] || 0) + settlement.amount;
+    totals[settlement.to] = (totals[settlement.to] || 0) - settlement.amount;
+  });
+  return active.map((member) => ({ ...member, balance: Number((totals[member.id] || 0).toFixed(2)) }));
+}
 
-  const balances = useMemo<Balance[]>(() => calculateBalances(expenses, houseMembers) as Balance[], [expenses, houseMembers]);
-
-  const total = useMemo(() => expenses.reduce((sum, expense) => sum + expense.amount, 0), [expenses]);
-  const householdSummary = useMemo(() => summarizeHousehold(expenses, houseMembers), [expenses, houseMembers]);
+export default function NestSplit() {
+  const [houses, setHouses] = useState<House[]>([]);
+  const [session, setSession] = useState<Session | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  const [authMode, setAuthMode] = useState<"welcome" | "register" | "join" | "login">("welcome");
+  const [screen, setScreen] = useState<"home" | "activity" | "insights" | "settings">("home");
+  const [sheet, setSheet] = useState<"expense" | "member" | "settlement" | "pin" | null>(null);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
-    const hydrate = async () => {
-      try {
-        const storedProfile = window.localStorage.getItem(PROFILE_STORAGE_KEY);
-        const parsedProfile = storedProfile ? (JSON.parse(storedProfile) as { accountName?: string; householdName?: string }) : null;
-        const resolvedAccountName = parsedProfile?.accountName?.trim() || "Shail";
-        const resolvedHouseholdName = parsedProfile?.householdName?.trim() || "The Nest";
-        const nextHouseholdKey = createHouseholdKey({
-          userId: resolvedAccountName,
-          householdName: resolvedHouseholdName,
-        });
-
-        setAccountName(resolvedAccountName);
-        setHouseholdName(resolvedHouseholdName);
-        setActiveHouseholdKey(nextHouseholdKey);
-
-        const storedRecentHouseholds = window.localStorage.getItem("nestsplit-recent-households");
-        if (storedRecentHouseholds) {
-          try {
-            const parsedRecentHouseholds = JSON.parse(storedRecentHouseholds) as Array<{ accountName: string; householdName: string; key: string }>;
-            setRecentHouseholds(parsedRecentHouseholds);
-          } catch {
-            setRecentHouseholds([]);
-          }
-        }
-
-        const snapshot = await loadHouseholdSnapshot(members, initialExpenses, nextHouseholdKey);
-        setExpenses(snapshot.expenses);
-        setHouseMembers(snapshot.members);
-        const nextDefaultMember = snapshot.members[0] ?? members[0];
-        setPayer(nextDefaultMember);
-        setEditPayer(nextDefaultMember);
-      } catch {
-        const fallbackHouseholdKey = createHouseholdKey({ userId: "Shail", householdName: "The Nest" });
-        const snapshot = await loadHouseholdSnapshot(members, initialExpenses, fallbackHouseholdKey);
-        setExpenses(snapshot.expenses);
-        setHouseMembers(snapshot.members);
-        const nextDefaultMember = snapshot.members[0] ?? members[0];
-        setPayer(nextDefaultMember);
-        setEditPayer(nextDefaultMember);
-      } finally {
-        setIsHydrated(true);
-      }
-    };
-
-    void hydrate();
+    try {
+      // The first client render restores the persisted device session.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHouses(JSON.parse(localStorage.getItem(HOUSES_KEY) || "[]"));
+      setSession(JSON.parse(localStorage.getItem(SESSION_KEY) || "null"));
+    } catch { localStorage.removeItem(HOUSES_KEY); localStorage.removeItem(SESSION_KEY); }
+    setHydrated(true);
   }, []);
+  useEffect(() => { if (hydrated) localStorage.setItem(HOUSES_KEY, JSON.stringify(houses)); }, [houses, hydrated]);
+  useEffect(() => { if (hydrated) { if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session)); else localStorage.removeItem(SESSION_KEY); } }, [session, hydrated]);
 
-  useEffect(() => {
-    if (!isHydrated) {
-      return;
-    }
+  const house = houses.find((entry) => entry.id === session?.houseId) || null;
+  const member = house?.members.find((entry) => entry.id === session?.memberId) || null;
+  const balances = house ? getBalances(house) : [];
+  const myBalance = balances.find((entry) => entry.id === member?.id)?.balance || 0;
+  const activeMembers = house?.members.filter((entry) => entry.active) || [];
+  const monthExpenses = house?.expenses.filter((entry) => entry.date.slice(0, 7) === today().slice(0, 7)) || [];
+  const monthTotal = monthExpenses.reduce((sum, entry) => sum + entry.amount, 0);
+  const updateHouse = (next: House) => setHouses((current) => current.map((entry) => entry.id === next.id ? next : entry));
+  const flash = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 2400); };
 
-    window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ accountName, householdName }));
+  if (!hydrated) return <main className="app-stage"><div className="phone-shell splash"><div className="logo">N</div><p>NestSplit</p></div></main>;
+  if (!house || !member || !member.active) return <Auth authMode={authMode} setAuthMode={setAuthMode} houses={houses} setHouses={setHouses} setSession={setSession} flash={flash} />;
 
-    const nextRecentHouseholds = mergeRecentHouseholds(recentHouseholds, { accountName, householdName });
-    window.localStorage.setItem("nestsplit-recent-households", JSON.stringify(nextRecentHouseholds));
+  const isOwner = member.role === "owner";
+  const currentMonthName = new Date().toLocaleDateString("en-IN", { month: "long" });
+  const recent = [...house.expenses].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  const categoryTotals = Object.entries(house.expenses.reduce<Record<string, number>>((acc, entry) => ({ ...acc, [entry.category]: (acc[entry.category] || 0) + entry.amount }), {})).sort((a, b) => b[1] - a[1]);
 
-    void saveHouseholdSnapshot(
-      {
-        expenses,
-        members: houseMembers,
-        updatedAt: new Date().toISOString(),
-      },
-      activeHouseholdKey,
-    );
-  }, [accountName, activeHouseholdKey, expenses, householdName, houseMembers, isHydrated, recentHouseholds]);
+  return <main className="app-stage"><div className="phone-shell">
+    <header className="app-header"><div><p className="eyebrow">{house.name}</p><h1>{screen === "home" ? "Good day, " + member.name.split(" ")[0] : screen[0].toUpperCase() + screen.slice(1)}</h1></div><button className="avatar" onClick={() => setScreen("settings")}>{member.name.slice(0, 1).toUpperCase()}</button></header>
+    <div className="content">
+      {screen === "home" && <>
+        <section className="hero-card"><p>HOUSEHOLD EXPENSE</p><strong>{currency(monthTotal)}</strong><span>{currentMonthName} · {activeMembers.length} members</span><div className="balance-chip">{myBalance >= 0 ? "You get back" : "You owe"} <b>{currency(Math.abs(myBalance))}</b></div></section>
+        <div className="section-title"><h2>Quick add</h2><button onClick={() => setSheet("expense")}>Add expense</button></div>
+        <button className="quick-add" onClick={() => setSheet("expense")}><span>＋</span><div><b>Record an expense</b><small>Split equally with the house</small></div><i>›</i></button>
+        <div className="section-title"><h2>Recent expenses</h2><button onClick={() => setScreen("activity")}>See all</button></div>
+        <ExpenseList expenses={recent} house={house} />
+        <div className="section-title"><h2>This month</h2></div><section className="summary-card"><div><small>Daily average</small><b>{currency(monthTotal / Math.max(new Date().getDate(), 1))}</b></div><div><small>Top category</small><b>{categoryTotals[0]?.[0] || "—"}</b></div></section>
+        <button className="insight-card" onClick={() => setScreen("insights")}><span>✦</span><div><small>SMALL INSIGHT</small><b>{categoryTotals[0] ? `${categoryTotals[0][0]} is your largest shared expense.` : "Add an expense to unlock insights."}</b></div><i>›</i></button>
+      </>}
+      {screen === "activity" && <><p className="screen-copy">Every shared expense and settlement in one place.</p><ExpenseList expenses={[...house.expenses].sort((a,b) => b.date.localeCompare(a.date))} house={house} full /><button className="secondary-action" onClick={() => setSheet("settlement")}>Record a settlement</button></>}
+      {screen === "insights" && <><section className="insight-hero"><small>MONTHLY SUMMARY</small><strong>{currency(monthTotal)}</strong><span>{monthExpenses.length} expenses this month</span></section><div className="section-title"><h2>Spend by category</h2></div><section className="chart-card">{categoryTotals.length ? categoryTotals.map(([name, value]) => <div className="bar-row" key={name}><div><span>{name}</span><b>{currency(value)}</b></div><i><em style={{ width: `${Math.max(10, value / categoryTotals[0][1] * 100)}%` }} /></i></div>) : <p className="empty">Your categories will appear here.</p>}</section><div className="section-title"><h2>Balances</h2></div><BalanceList balances={balances} /></>}
+      {screen === "settings" && <><section className="profile-card"><div className="profile-avatar">{member.name.slice(0, 1)}</div><div><b>{member.name}</b><small>{member.mobile} · {isOwner ? "Owner" : "Member"}</small></div></section>{isOwner && <section className="members-card"><div><b>Members</b><button onClick={() => setSheet("member")}>Add</button></div>{activeMembers.map((entry) => <p key={entry.id}><span>{entry.name}<small>{entry.role === "owner" ? "Owner" : entry.mobile}</small></span>{entry.role === "member" && <button onClick={() => updateHouse({ ...house, members: house.members.map((item) => item.id === entry.id ? { ...item, active: false } : item) })}>Deactivate</button>}</p>)}</section>}<div className="setting-group"><small>HOUSE</small>{isOwner && <button onClick={() => flash(`House ID: ${house.id}`)}><span>⌁</span>House ID <b>View</b></button>}{isOwner && <button onClick={() => flash(`House PIN: ${house.pin}`)}><span>⌁</span>House PIN <b>View</b></button>}{isOwner && <button onClick={() => setSheet("member")}><span>＋</span>Manage members <b>{activeMembers.length}</b></button>}{isOwner && <button onClick={() => setSheet("pin")}><span>⌘</span>Reset House PIN <b>›</b></button>}</div><div className="setting-group"><small>ACCOUNT</small><button onClick={() => { setSession(null); setAuthMode("welcome"); }}><span>↪</span>Log out <b>›</b></button></div></>}
+    </div>
+    <button className="fab" onClick={() => setSheet("expense")} aria-label="Add expense">＋</button>
+    <nav className="bottom-nav">{([ ["home", "⌂", "Home"], ["activity", "◷", "Activity"], ["add", "＋", ""], ["insights", "◔", "Insights"], ["settings", "⚙", "Settings"] ] as const).map(([key, icon, label]) => <button key={key} className={screen === key ? "active" : key === "add" ? "nav-add" : ""} onClick={() => key === "add" ? setSheet("expense") : setScreen(key as typeof screen)}><i>{icon}</i>{label && <span>{label}</span>}</button>)}</nav>
+    {sheet && <Sheet type={sheet} house={house} member={member} isOwner={isOwner} updateHouse={updateHouse} close={() => setSheet(null)} flash={flash} />}
+    {notice && <div className="toast">{notice}</div>}
+  </div></main>;
+}
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+function Auth({ authMode, setAuthMode, houses, setHouses, setSession, flash }: { authMode: string; setAuthMode: (mode: "welcome" | "register" | "join" | "login") => void; houses: House[]; setHouses: (value: House[]) => void; setSession: (value: Session) => void; flash: (value: string) => void }) {
+  const privateSubmit = (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const pin = String(form.get("pin") || ""); if (!/^\d{4,6}$/.test(pin)) return flash("Enter a 4–6 digit House PIN."); if (authMode === "register") { const name = String(form.get("name") || "").trim(); const mobile = String(form.get("mobile") || "").replace(/\D/g, ""); if (!name || mobile.length < 10) return flash("Enter your name and a valid mobile number."); const owner: Member = { id: uid(), name, mobile, role: "owner", active: true }; const house: House = { id: houseCode(), name: String(form.get("houseName") || "").trim() || "Our Home", pin, ownerId: owner.id, members: [owner], expenses: [], settlements: [] }; setHouses([...houses, house]); setSession({ houseId: house.id, memberId: owner.id }); return; } const lastFour = String(form.get("lastFour") || "").replace(/\D/g, ""); const matches = houses.flatMap((house) => house.pin === pin ? house.members.filter((entry) => entry.active && entry.mobile.endsWith(lastFour)).map((entry) => ({ house, member: entry })) : []); if (lastFour.length !== 4 || matches.length !== 1) return flash("Check your last 4 digits and House PIN."); setSession({ houseId: matches[0].house.id, memberId: matches[0].member.id }); };
+  const registering = authMode === "register";
+  if (true) return <main className="app-stage"><div className="phone-shell auth-shell">{authMode === "welcome" ? <><div className="auth-art"><div className="logo">N</div><span>Shared living, simplified.</span></div><div className="auth-copy"><p className="eyebrow">NESTSPLIT</p><h1>Money at home,<br />made simple.</h1><p>Share expenses, settle up, and keep your home in sync.</p></div><div className="auth-actions"><button onClick={() => setAuthMode("register")}>Create a house</button><button className="outline" onClick={() => setAuthMode("login")}>Log in to your house</button></div></> : <form className="auth-form" onSubmit={privateSubmit}><button type="button" className="back" onClick={() => setAuthMode("welcome")}>Back</button><div className="logo small">N</div><h1>{registering ? "Create your house" : "Welcome back"}</h1><p>{registering ? "You’ll be the owner and can add members afterwards." : "Enter your private mobile ID and House PIN."}</p>{registering && <><label>Full name<input name="name" placeholder="Your name" /></label><label>Mobile number<input name="mobile" inputMode="numeric" placeholder="10-digit mobile number" /></label><label>House name<input name="houseName" placeholder="e.g. Palm House" /></label></>}{!registering && <label>Mobile number ID<input name="lastFour" inputMode="numeric" maxLength={4} placeholder="Last 4 digits" /></label>}<label>House PIN<input name="pin" type="password" inputMode="numeric" maxLength={6} placeholder="4–6 digits" /></label><button type="submit">{registering ? "Create house" : "Log in"}</button></form>}</div></main>;
+  const submit = (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); const name = String(form.get("name") || "").trim(); const mobile = String(form.get("mobile") || "").replace(/\D/g, ""); const id = String(form.get("houseId") || "").trim().toUpperCase(); const pin = String(form.get("pin") || ""); if (!name || mobile.length < 10 || !/^\d{4,6}$/.test(pin)) return flash("Enter a name, valid mobile number, and 4–6 digit PIN."); if (authMode === "register") { if (houses.some((house) => house.members.some((member) => member.mobile === mobile))) return flash("This mobile number is already registered."); const owner: Member = { id: uid(), name, mobile, role: "owner", active: true }; const house: House = { id: houseCode(), name: String(form.get("houseName") || "").trim() || "Our Home", pin, ownerId: owner.id, members: [owner], expenses: [], settlements: [] }; setHouses([...houses, house]); setSession({ houseId: house.id, memberId: owner.id }); flash(`House created · ID ${house.id} · PIN ${pin}`); return; } const house = houses.find((entry) => entry.id === id && entry.pin === pin); if (!house) return flash("Check the House ID and House PIN."); const matched = house.members.find((entry) => entry.mobile === mobile && entry.active); if (!matched) return flash("This mobile number is not a member of this house."); setSession({ houseId: house.id, memberId: matched.id }); };
+  return <main className="app-stage"><div className="phone-shell auth-shell">{authMode === "welcome" ? <><div className="auth-art"><div className="logo">N</div><span>Shared living, simplified.</span></div><div className="auth-copy"><p className="eyebrow">NESTSPLIT</p><h1>Money at home,<br />made simple.</h1><p>Share expenses, settle up, and keep your home in sync.</p></div><div className="auth-actions"><button onClick={() => setAuthMode("register")}>Create a house</button><button className="outline" onClick={() => setAuthMode("join")}>Join a house</button><button className="text-button" onClick={() => setAuthMode("login")}>Already a member? Log in</button></div></> : <form className="auth-form" onSubmit={submit}><button type="button" className="back" onClick={() => setAuthMode("welcome")}>‹ Back</button><div className="logo small">N</div><h1>{authMode === "register" ? "Create your house" : authMode === "join" ? "Join your house" : "Welcome back"}</h1><p>{authMode === "register" ? "You’ll be the owner and can add members afterwards." : "Use the details shared by your house owner."}</p><label>Full name<input name="name" placeholder="Your name" autoComplete="name" /></label><label>Mobile number<input name="mobile" inputMode="numeric" placeholder="10-digit mobile number" autoComplete="tel" /></label>{authMode === "register" && <label>House name<input name="houseName" placeholder="e.g. Palm House" /></label>}{authMode !== "register" && <label>House ID<input name="houseId" placeholder="e.g. NS-ABCD12" autoCapitalize="characters" /></label>}<label>House PIN<input name="pin" type="password" inputMode="numeric" maxLength={6} placeholder="4–6 digits" /></label><button type="submit">{authMode === "register" ? "Create house" : authMode === "join" ? "Join house" : "Log in"}</button></form>}</div></main>;
+}
 
-    const parsedAmount = Number(amount);
-    if (!title.trim() || !parsedAmount) {
-      return;
-    }
-
-    setExpenses((current) => [
-      ...current,
-      {
-        id: createExpenseId(),
-        title: title.trim(),
-        amount: parsedAmount,
-        payer,
-        participants: houseMembers,
-        category: category.trim() || "Other",
-        date: expenseDate || new Date().toISOString().slice(0, 10),
-      },
-    ]);
-
-    setTitle("");
-    setAmount("");
-    setCategory("Food");
-    setExpenseDate(new Date().toISOString().slice(0, 10));
-    setPayer(houseMembers[0] ?? members[0]);
-  };
-
-  const applyHouseholdSelection = async (nextAccountName: string, nextHouseholdName: string) => {
-    const resolvedAccountName = nextAccountName.trim() || "Guest";
-    const resolvedHouseholdName = nextHouseholdName.trim() || "Home";
-    const nextHouseholdKey = createHouseholdKey({ userId: resolvedAccountName, householdName: resolvedHouseholdName });
-
-    setAccountName(resolvedAccountName);
-    setHouseholdName(resolvedHouseholdName);
-    setActiveHouseholdKey(nextHouseholdKey);
-
-    window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ accountName: resolvedAccountName, householdName: resolvedHouseholdName }));
-
-    const nextRecentHouseholds = mergeRecentHouseholds(recentHouseholds, { accountName: resolvedAccountName, householdName: resolvedHouseholdName });
-    const hasChanged = JSON.stringify(nextRecentHouseholds) !== JSON.stringify(recentHouseholds);
-
-    if (hasChanged) {
-      setRecentHouseholds(nextRecentHouseholds);
-    }
-
-    window.localStorage.setItem("nestsplit-recent-households", JSON.stringify(nextRecentHouseholds));
-
-    const snapshot = await loadHouseholdSnapshot(members, initialExpenses, nextHouseholdKey);
-    setExpenses(snapshot.expenses);
-    setHouseMembers(snapshot.members);
-    const nextDefaultMember = snapshot.members[0] ?? members[0];
-    setPayer(nextDefaultMember);
-    setEditPayer(nextDefaultMember);
-    setIsHydrated(true);
-  };
-
-  const handleSwitchHousehold = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    await applyHouseholdSelection(accountName, householdName);
-  };
-
-  const handleRecentHouseholdSelect = async (entry: { accountName: string; householdName: string; key: string }) => {
-    await applyHouseholdSelection(entry.accountName, entry.householdName);
-  };
-
-  const handleAddMember = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    const trimmedName = memberName.trim();
-    if (!trimmedName || houseMembers.includes(trimmedName)) {
-      return;
-    }
-
-    const nextMembers = [...houseMembers, trimmedName];
-    setHouseMembers(nextMembers);
-    setExpenses((current) =>
-      current.map((expense) => ({
-        ...expense,
-        participants: nextMembers,
-        payer: expense.payer === payer ? payer : expense.payer,
-      })),
-    );
-    setMemberName("");
-  };
-
-  const handleRemoveMember = (memberToRemove: string) => {
-    if (houseMembers.length === 1) {
-      return;
-    }
-
-    const nextMembers = houseMembers.filter((member) => member !== memberToRemove);
-    setHouseMembers(nextMembers);
-    setExpenses((current) =>
-      current.map((expense) => ({
-        ...expense,
-        participants: nextMembers,
-        payer: expense.payer === memberToRemove ? nextMembers[0] : expense.payer,
-      })),
-    );
-    setPayer((current) => (current === memberToRemove ? nextMembers[0] : current));
-    setEditPayer((current) => (current === memberToRemove ? nextMembers[0] : current));
-  };
-
-  const handleStartEdit = (expense: Expense) => {
-    setEditingExpenseId(expense.id);
-    setEditTitle(expense.title);
-    setEditAmount(String(expense.amount));
-    setEditCategory(expense.category || "Other");
-    setEditDate(expense.date || new Date().toISOString().slice(0, 10));
-    setEditPayer(expense.payer);
-  };
-
-  const handleCancelEdit = () => {
-    setEditingExpenseId(null);
-    setEditTitle("");
-    setEditAmount("");
-    setEditCategory("Food");
-    setEditDate(new Date().toISOString().slice(0, 10));
-    setEditPayer(houseMembers[0] ?? members[0]);
-  };
-
-  const handleEditSubmit = (event: React.FormEvent<HTMLFormElement>, expenseId: string) => {
-    event.preventDefault();
-
-    const parsedAmount = Number(editAmount);
-    if (!editTitle.trim() || !parsedAmount) {
-      return;
-    }
-
-    setExpenses((current) =>
-      current.map((expense) =>
-        expense.id === expenseId
-          ? {
-              ...expense,
-              title: editTitle.trim(),
-              amount: parsedAmount,
-              payer: editPayer,
-              category: editCategory.trim() || "Other",
-              date: editDate || new Date().toISOString().slice(0, 10),
-            }
-          : expense,
-      ),
-    );
-
-    handleCancelEdit();
-  };
-
-  const handleDelete = (expenseId: string) => {
-    setExpenses((current) => current.filter((expense) => expense.id !== expenseId));
-    if (editingExpenseId === expenseId) {
-      handleCancelEdit();
-    }
-  };
-
-  return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.2),_transparent_45%),linear-gradient(135deg,_#f8fbff_0%,_#eef4ff_100%)] px-4 py-8 text-slate-900 sm:px-6 lg:px-8">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6">
-        <section className="overflow-hidden rounded-[2rem] border border-slate-200/80 bg-white/80 p-6 shadow-[0_20px_80px_rgba(15,23,42,0.08)] backdrop-blur sm:p-8 lg:p-10">
-          <div className="flex flex-col gap-8 lg:flex-row lg:items-end lg:justify-between">
-            <div className="max-w-2xl space-y-5">
-              <span className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-sm font-medium text-cyan-700">
-                NestSplit • Shared home, split simply
-              </span>
-              <div className="space-y-3">
-                <h1 className="text-4xl font-semibold tracking-tight text-slate-900 sm:text-5xl">
-                  Track shared expenses without the month-end headache.
-                </h1>
-                <p className="max-w-xl text-lg leading-8 text-slate-600">
-                  Add purchases in seconds, keep everyone in sync, and see who owes what with clean, instant balance updates.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                <a
-                  href="#dashboard"
-                  className="rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-700"
-                >
-                  Open dashboard
-                </a>
-                <Link
-                  href="/insights"
-                  className="rounded-full border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-                >
-                  View insights
-                </Link>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {houseMembers.map((member) => (
-                  <span key={member} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-sm font-medium text-slate-700">
-                    {member}
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-3xl border border-slate-200 bg-slate-950 p-5 text-white shadow-xl">
-              <p className="text-sm uppercase tracking-[0.24em] text-slate-400">This month</p>
-              <p className="mt-2 text-3xl font-semibold">₹{total}</p>
-              <p className="mt-2 text-sm text-slate-300">Total shared spending across {houseMembers.length} members</p>
-            </div>
-          </div>
-        </section>
-
-        <section className="rounded-[2rem] border border-slate-200/80 bg-white p-6 shadow-[0_20px_80px_rgba(15,23,42,0.06)] sm:p-8">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-500">Household profile</p>
-              <h2 className="text-2xl font-semibold text-slate-900">Switch and save your shared space</h2>
-              <p className="mt-2 max-w-2xl text-sm leading-7 text-slate-600">
-                Each profile keeps its own expenses, members, and balances so you can manage more than one home from the same app.
-              </p>
-            </div>
-            <form onSubmit={handleSwitchHousehold} className="w-full max-w-2xl space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <input
-                  value={accountName}
-                  onChange={(event) => setAccountName(event.target.value)}
-                  placeholder="Your name"
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-0"
-                />
-                <input
-                  value={householdName}
-                  onChange={(event) => setHouseholdName(event.target.value)}
-                  placeholder="Household name"
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-0"
-                />
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <p className="text-sm text-slate-500">Active key: <span className="font-medium text-slate-700">{activeHouseholdKey}</span></p>
-                <button
-                  type="submit"
-                  className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700"
-                >
-                  Switch household
-                </button>
-              </div>
-              {recentHouseholds.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {recentHouseholds.map((entry) => (
-                    <button
-                      key={entry.key}
-                      type="button"
-                      onClick={() => void handleRecentHouseholdSelect(entry)}
-                      className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
-                    >
-                      {entry.accountName} • {entry.householdName}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </form>
-          </div>
-        </section>
-
-        <section id="dashboard" className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <div className="rounded-[2rem] border border-slate-200/80 bg-white p-6 shadow-[0_20px_80px_rgba(15,23,42,0.06)] sm:p-8">
-            <div className="mb-5 grid gap-3 md:grid-cols-3">
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">House total</p>
-                <p className="mt-1 text-xl font-semibold text-slate-900">₹{total}</p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Avg per person</p>
-                <p className="mt-1 text-xl font-semibold text-slate-900">₹{householdSummary.averagePerMember}</p>
-              </div>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Highest spend</p>
-                <p className="mt-1 text-xl font-semibold text-slate-900">{householdSummary.highestExpense?.title ?? "No entries"}</p>
-              </div>
-            </div>
-            <div className="mb-6 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-500">Latest activity</p>
-                <h2 className="text-2xl font-semibold text-slate-900">Expense flow</h2>
-              </div>
-            </div>
-
-            <form onSubmit={handleSubmit} className="mb-5 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <input
-                  value={title}
-                  onChange={(event) => setTitle(event.target.value)}
-                  placeholder="What did you buy?"
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-0"
-                />
-                <input
-                  value={amount}
-                  onChange={(event) => setAmount(event.target.value)}
-                  type="number"
-                  min="0"
-                  placeholder="Amount"
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-0"
-                />
-              </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <select
-                  value={category}
-                  onChange={(event) => setCategory(event.target.value)}
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none"
-                >
-                  <option value="Food">Food</option>
-                  <option value="Bills">Bills</option>
-                  <option value="Utilities">Utilities</option>
-                  <option value="Fun">Fun</option>
-                  <option value="Other">Other</option>
-                </select>
-                <input
-                  value={expenseDate}
-                  onChange={(event) => setExpenseDate(event.target.value)}
-                  type="date"
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none"
-                />
-                <select
-                  value={payer}
-                  onChange={(event) => setPayer(event.target.value)}
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none"
-                >
-                  {houseMembers.map((member) => (
-                    <option key={member} value={member}>
-                      {member}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="submit"
-                  className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700"
-                >
-                  Add expense
-                </button>
-              </div>
-            </form>
-
-            <div className="space-y-3">
-              {expenses.map((expense) => {
-                const isEditing = editingExpenseId === expense.id;
-
-                return (
-                  <div key={expense.id} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                    {isEditing ? (
-                      <form onSubmit={(event) => handleEditSubmit(event, expense.id)} className="space-y-3">
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <input
-                            value={editTitle}
-                            onChange={(event) => setEditTitle(event.target.value)}
-                            placeholder="What did you buy?"
-                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-0"
-                          />
-                          <input
-                            value={editAmount}
-                            onChange={(event) => setEditAmount(event.target.value)}
-                            type="number"
-                            min="0"
-                            placeholder="Amount"
-                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-0"
-                          />
-                        </div>
-                        <div className="flex flex-wrap items-center gap-3">
-                          <div className="grid gap-3 sm:grid-cols-3">
-                            <select
-                              value={editCategory}
-                              onChange={(event) => setEditCategory(event.target.value)}
-                              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none"
-                            >
-                              <option value="Food">Food</option>
-                              <option value="Bills">Bills</option>
-                              <option value="Utilities">Utilities</option>
-                              <option value="Fun">Fun</option>
-                              <option value="Other">Other</option>
-                            </select>
-                            <input
-                              value={editDate}
-                              onChange={(event) => setEditDate(event.target.value)}
-                              type="date"
-                              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none"
-                            />
-                            <select
-                              value={editPayer}
-                              onChange={(event) => setEditPayer(event.target.value)}
-                              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none"
-                            >
-                              {houseMembers.map((member) => (
-                                <option key={member} value={member}>
-                                  {member}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="submit"
-                              className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700"
-                            >
-                              Save
-                            </button>
-                            <button
-                              type="button"
-                              onClick={handleCancelEdit}
-                              className="rounded-full border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      </form>
-                    ) : (
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                          <p className="font-semibold text-slate-900">{expense.title}</p>
-                          <p className="text-sm text-slate-500">{expense.category || "Other"} • {expense.date || "No date"}</p>
-                          <p className="text-sm text-slate-500">Paid by {expense.payer}</p>
-                        </div>
-                        <div className="text-left sm:text-right">
-                          <p className="font-semibold text-slate-900">₹{expense.amount}</p>
-                          <p className="text-sm text-slate-500">Split equally</p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleStartEdit(expense)}
-                            className="rounded-full border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDelete(expense.id)}
-                            className="rounded-full border border-rose-200 px-3 py-1.5 text-sm font-semibold text-rose-700 transition hover:bg-rose-50"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="rounded-[2rem] border border-slate-200/80 bg-slate-950 p-6 text-white shadow-[0_20px_80px_rgba(15,23,42,0.16)] sm:p-8">
-            <p className="text-sm font-medium uppercase tracking-[0.24em] text-slate-400">Balances</p>
-            <h2 className="mt-2 text-2xl font-semibold">Who owes what</h2>
-            <div className="mt-6 space-y-3">
-              {balances.map((item) => (
-                <div key={item.member} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/10 px-4 py-3">
-                  <span className="font-medium">{item.member}</span>
-                  <span className={`font-semibold ${item.net < 0 ? "text-rose-300" : "text-emerald-300"}`}>
-                    {item.net < 0 ? "Owes" : "Gets"} ₹{Math.abs(item.net)}
-                  </span>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-6 space-y-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4">
-              <div>
-                <p className="text-sm font-medium text-cyan-200">Suggested settlement</p>
-                <p className="mt-2 text-sm leading-7 text-slate-300">
-                  {householdSummary.largestPositiveBalance && householdSummary.largestNegativeBalance
-                    ? `${householdSummary.largestPositiveBalance.member} should receive from ${householdSummary.largestNegativeBalance.member}`
-                    : "Add a few expenses to see the next best settlement step."}
-                </p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-slate-950/20 p-3 text-sm text-slate-200">
-                <p className="font-medium">Top payer: {householdSummary.topPayer.member}</p>
-                <p className="mt-1 text-slate-300">₹{householdSummary.topPayer.total} contributed so far</p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section id="members" className="rounded-[2rem] border border-slate-200/80 bg-white p-6 shadow-[0_20px_80px_rgba(15,23,42,0.06)] sm:p-8">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-500">Members</p>
-              <h2 className="text-2xl font-semibold text-slate-900">Household roster</h2>
-            </div>
-            <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-sm font-medium text-slate-700">
-              {houseMembers.length} active members
-            </div>
-          </div>
-
-          <form onSubmit={handleAddMember} className="mt-5 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:flex-row">
-            <input
-              value={memberName}
-              onChange={(event) => setMemberName(event.target.value)}
-              placeholder="Add a housemate"
-              className="flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-0"
-            />
-            <button
-              type="submit"
-              className="rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-700"
-            >
-              Add member
-            </button>
-          </form>
-
-          <div className="mt-5 grid gap-3 md:grid-cols-2">
-            {houseMembers.map((member) => (
-              <div key={member} className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <span className="font-medium text-slate-900">{member}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveMember(member)}
-                  disabled={houseMembers.length === 1}
-                  className="rounded-full border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section id="features" className="grid gap-4 md:grid-cols-3">
-          {[
-            {
-              title: "Lightning-fast entry",
-              text: "Capture an expense in a few taps with smart defaults and instant split suggestions.",
-            },
-            {
-              title: "Clear household math",
-              text: "See totals, contributions, balances, and suggested settlements in one view.",
-            },
-            {
-              title: "Built for real homes",
-              text: "Made for shared living, multiple members, and multi-house tenant isolation.",
-            },
-          ].map((feature: { title: string; text: string }) => (
-            <div key={feature.title} className="rounded-[1.5rem] border border-slate-200/80 bg-white/70 p-5 shadow-sm">
-              <h3 className="text-lg font-semibold text-slate-900">{feature.title}</h3>
-              <p className="mt-2 text-sm leading-7 text-slate-600">{feature.text}</p>
-            </div>
-          ))}
-        </section>
-      </div>
-    </main>
-  );
+function ExpenseList({ expenses, house, full = false }: { expenses: Expense[]; house: House; full?: boolean }) { if (!expenses.length) return <div className="empty">No expenses yet. Add the first one in a few taps.</div>; return <div className={full ? "expense-list full" : "expense-list"}>{expenses.map((expense) => <div className="expense-row" key={expense.id}><div className="expense-icon">{expense.category.slice(0, 1)}</div><div><b>{expense.title}</b><small>{expense.category} · Paid by {house.members.find((entry) => entry.id === expense.paidBy)?.name || "Member"}</small></div><div><b>{currency(expense.amount)}</b><small>{new Date(expense.date + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</small></div></div>)}</div>; }
+function BalanceList({ balances }: { balances: ReturnType<typeof getBalances> }) { return <div className="balance-list">{balances.map((entry) => <div key={entry.id}><div className="mini-avatar">{entry.name[0]}</div><span>{entry.name}</span><b className={entry.balance >= 0 ? "positive" : "negative"}>{entry.balance >= 0 ? "gets " : "owes "}{currency(Math.abs(entry.balance))}</b></div>)}</div>; }
+function Sheet({ type, house, member, isOwner, updateHouse, close, flash }: { type: "expense" | "member" | "settlement" | "pin"; house: House; member: Member; isOwner: boolean; updateHouse: (house: House) => void; close: () => void; flash: (value: string) => void }) {
+  const active = house.members.filter((entry) => entry.active); const save = (event: React.FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); if (type === "expense") { const amount = Number(form.get("amount")); const title = String(form.get("title") || "").trim(); if (!title || amount <= 0) return flash("Add an expense name and amount."); updateHouse({ ...house, expenses: [{ id: uid(), title, amount, category: String(form.get("category") || "Other"), date: String(form.get("date") || today()), paidBy: String(form.get("paidBy") || member.id), createdBy: member.id }, ...house.expenses] }); close(); } if (type === "member" && isOwner) { const name = String(form.get("name") || "").trim(); const mobile = String(form.get("mobile") || "").replace(/\D/g, ""); if (!name || mobile.length < 10) return flash("Enter the member name and mobile number."); if (house.members.some((entry) => entry.mobile === mobile)) return flash("That mobile number is already in this house."); updateHouse({ ...house, members: [...house.members, { id: uid(), name, mobile, role: "member", active: true }] }); close(); } if (type === "settlement") { const amount = Number(form.get("amount")); const to = String(form.get("to") || ""); if (!to || amount <= 0) return flash("Choose who you paid and the amount."); updateHouse({ ...house, settlements: [{ id: uid(), from: member.id, to, amount, date: today() }, ...house.settlements] }); close(); } if (type === "pin" && isOwner) { const pin = String(form.get("pin") || ""); if (!/^\d{4,6}$/.test(pin)) return flash("House PIN must be 4–6 digits."); updateHouse({ ...house, pin }); close(); flash("House PIN updated."); } };
+  return <div className="sheet-backdrop" onMouseDown={close}><section className="sheet" onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-head"><h2>{type === "expense" ? "Add expense" : type === "member" ? "Add member" : type === "settlement" ? "Record settlement" : "Reset House PIN"}</h2><button onClick={close}>×</button></div><form onSubmit={save}>{type === "expense" && <><label>What was it?<input name="title" placeholder="e.g. Groceries" autoFocus /></label><label>Amount<input name="amount" type="number" inputMode="decimal" placeholder="0" /></label><label>Category<select name="category"><option>Food</option><option>Rent</option><option>Bills</option><option>Transport</option><option>Other</option></select></label><label>Paid by<select name="paidBy" defaultValue={member.id}>{active.map((entry) => <option value={entry.id} key={entry.id}>{entry.name}</option>)}</select></label><label>Date<input name="date" type="date" defaultValue={today()} /></label></>}{type === "member" && <><p className="sheet-copy">They can log in after you add their exact mobile number.</p><label>Member name<input name="name" autoFocus placeholder="Full name" /></label><label>Mobile number<input name="mobile" inputMode="numeric" placeholder="10-digit mobile number" /></label></>}{type === "settlement" && <><p className="sheet-copy">Record money you paid to settle your balance.</p><label>Paid to<select name="to"><option value="">Select member</option>{active.filter((entry) => entry.id !== member.id).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label><label>Amount<input name="amount" type="number" inputMode="decimal" placeholder="0" /></label></>}{type === "pin" && <label>New House PIN<input name="pin" type="password" inputMode="numeric" maxLength={6} autoFocus placeholder="4–6 digits" /></label>}<button className="sheet-submit" type="submit">{type === "expense" ? "Add expense" : type === "member" ? "Add member" : type === "settlement" ? "Save settlement" : "Update PIN"}</button></form></section></div>;
 }
