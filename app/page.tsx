@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Role = "owner" | "member";
 type Member = { id: string; name: string; mobile: string; role: Role; active: boolean };
@@ -15,6 +16,23 @@ const currency = (amount: number) => new Intl.NumberFormat("en-IN", { style: "cu
 const uid = () => typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const houseCode = () => `NS-${Math.random().toString(36).slice(2, 6).toUpperCase()}${Math.floor(10 + Math.random() * 90)}`;
 const today = () => new Date().toISOString().slice(0, 10);
+const DEMO_HOUSE: House = {
+  id: "NS-DEMO26", name: "Maple House", pin: "2486", ownerId: "demo-owner",
+  members: [
+    { id: "demo-owner", name: "Asha", mobile: "9876544821", role: "owner", active: true },
+    { id: "demo-rahul", name: "Rahul", mobile: "9823477619", role: "member", active: true },
+    { id: "demo-meera", name: "Meera", mobile: "9912349345", role: "member", active: true },
+  ],
+  settlements: [{ id: "demo-settlement", from: "demo-rahul", to: "demo-owner", amount: 850, date: "2026-07-28" }],
+  expenses: [
+    ["Feb groceries", 3400, "Food", "2026-02-04", "demo-owner"], ["Internet", 999, "Bills", "2026-02-12", "demo-rahul"], ["Gas refill", 1250, "Bills", "2026-02-21", "demo-meera"],
+    ["March groceries", 3820, "Food", "2026-03-03", "demo-owner"], ["Electricity", 1680, "Bills", "2026-03-16", "demo-meera"], ["House supplies", 890, "Other", "2026-03-24", "demo-rahul"],
+    ["April groceries", 3650, "Food", "2026-04-05", "demo-rahul"], ["Water bill", 720, "Bills", "2026-04-14", "demo-owner"], ["Dinner at home", 1550, "Food", "2026-04-26", "demo-meera"],
+    ["May groceries", 4100, "Food", "2026-05-02", "demo-owner"], ["Wi-Fi", 999, "Bills", "2026-05-12", "demo-rahul"], ["Cleaning supplies", 760, "Other", "2026-05-22", "demo-meera"],
+    ["June groceries", 3900, "Food", "2026-06-06", "demo-meera"], ["Electricity", 1920, "Bills", "2026-06-15", "demo-owner"], ["Movie night", 1200, "Other", "2026-06-27", "demo-rahul"],
+    ["July groceries", 4300, "Food", "2026-07-04", "demo-owner"], ["Gas refill", 1300, "Bills", "2026-07-13", "demo-meera"], ["House repairs", 2400, "Other", "2026-07-25", "demo-rahul"],
+  ].map(([title, amount, category, date, paidBy], index) => ({ id: `demo-expense-${index}`, title: String(title), amount: Number(amount), category: String(category), date: String(date), paidBy: String(paidBy), createdBy: String(paidBy) })),
+};
 
 function getBalances(house: House) {
   const active = house.members.filter((member) => member.active);
@@ -32,6 +50,7 @@ function getBalances(house: House) {
 }
 
 export default function NestSplit() {
+  const router = useRouter();
   const [houses, setHouses] = useState<House[]>([]);
   const [session, setSession] = useState<Session | null>(null);
   const [hydrated, setHydrated] = useState(false);
@@ -43,14 +62,25 @@ export default function NestSplit() {
   useEffect(() => {
     try {
       // The first client render restores the persisted device session.
+      const savedHouses = JSON.parse(localStorage.getItem(HOUSES_KEY) || "[]") as House[];
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setHouses(JSON.parse(localStorage.getItem(HOUSES_KEY) || "[]"));
+      setHouses(savedHouses.some((house) => house.id === DEMO_HOUSE.id) ? savedHouses : [DEMO_HOUSE, ...savedHouses]);
       setSession(JSON.parse(localStorage.getItem(SESSION_KEY) || "null"));
     } catch { localStorage.removeItem(HOUSES_KEY); localStorage.removeItem(SESSION_KEY); }
     setHydrated(true);
   }, []);
   useEffect(() => { if (hydrated) localStorage.setItem(HOUSES_KEY, JSON.stringify(houses)); }, [houses, hydrated]);
   useEffect(() => { if (hydrated) { if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session)); else localStorage.removeItem(SESSION_KEY); } }, [session, hydrated]);
+  useEffect(() => {
+    const openInsights = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest(".bottom-nav button:nth-child(4)")) {
+        event.preventDefault(); event.stopPropagation(); router.push("/insights");
+      }
+    };
+    document.addEventListener("click", openInsights, true);
+    return () => document.removeEventListener("click", openInsights, true);
+  }, [router]);
 
   const house = houses.find((entry) => entry.id === session?.houseId) || null;
   const member = house?.members.find((entry) => entry.id === session?.memberId) || null;
