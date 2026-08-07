@@ -1,1 +1,90 @@
 .sheet fieldset{margin:0 0 13px;padding:10px 12px;border:1px solid #dde3dc;border-radius:12px}.sheet legend{padding:0 4px;font-size:11px;color:#5d6c60;font-weight:800}.sheet label.check{display:flex;align-items:center;gap:8px;margin:8px 0;color:var(--ink)}.sheet label.check input{padding:0;accent-color:var(--green)}.house-actions{margin-top:14px}.house-actions button{font-size:15px}
+
+/* ==========================================================================
+   House identity header
+   ========================================================================== */
+.house-header{
+  padding: calc(env(safe-area-inset-top, 0px) + 16px) 18px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+/* House avatar — rounded square, soft mint background */
+.house-avatar{
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 15px;
+  background: linear-gradient(135deg, #d8f5c2 0%, #b6e8c2 100%);
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+}
+
+/* Identity button: avatar + text + chevron */
+.house-identity{
+  flex: 1;
+  min-width: 0;          /* allow text truncation */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+
+.house-identity-text{
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.house-name{
+  display: block;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.house-subtitle{
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.house-role-badge{
+  display: inline-block;
+  margin-top: 3px;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  color: var(--green);
+  background: #e6f6da;
+  border-radius: 5px;
+  padding: 2px 5px;
+}
+
+.house-chevron{
+  flex-shrink: 0;
+  font-style: normal;
+  font-size: 16px;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+/* Ensure the safe-area rule in globals.css does NOT double-apply to
+   .house-header (it targets .app-header only, so this is already safe). */

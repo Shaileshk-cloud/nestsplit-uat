@@ -486,13 +486,14 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
 
   if (loading) return (
     <>
-      <header className="app-header">
-        <button className="space-title" onClick={onSwitchSpace}>
-          <small>HOUSE</small>
-          <b>🏠 {house.name} <i>⌄</i></b>
-        </button>
-        <button className="bell" onClick={onLogout} aria-label="Log out">↪</button>
-      </header>
+      <HouseHeader
+        house={house}
+        memberCount={0}
+        myMember={null}
+        isOwner={false}
+        onSwitchSpace={onSwitchSpace}
+        onOpenSettings={() => {/* loading */}}
+      />
       <div className="content" style={{ paddingTop: 20 }}>
         <p className="empty">Loading {house.name}…</p>
       </div>
@@ -501,15 +502,14 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
 
   return (
     <>
-      <header className="app-header">
-        <button className="space-title" onClick={onSwitchSpace}>
-          <small>HOUSE</small>
-          <b>🏠 {house.name} <i>⌄</i></b>
-        </button>
-        <button className="bell" onClick={() => setScreen("settings")} aria-label="Settings">
-          <span style={{ fontSize: 13, fontWeight: 800 }}>{myMember?.name.slice(0, 1).toUpperCase() ?? "H"}</span>
-        </button>
-      </header>
+      <HouseHeader
+        house={house}
+        memberCount={activeMembers.length}
+        myMember={myMember}
+        isOwner={isOwner}
+        onSwitchSpace={onSwitchSpace}
+        onOpenSettings={() => setScreen("settings")}
+      />
 
       <div className="content">
         {/* ── HOME ── */}
@@ -662,8 +662,9 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         )}
       </div>
 
-      {/* FAB */}
-      <button className="fab" onClick={() => setSheet("expense")} aria-label="Add expense" style={{ display: "grid" }}>＋</button>
+      {/* The nav-add button in the bottom-nav below handles the add-expense
+          action. No separate FAB needed — the .fab CSS class hides it anyway
+          and an inline override was causing a stray "+" on the activity screen. */}
 
       {/* Bottom navigation */}
       <nav className="bottom-nav">
@@ -692,7 +693,7 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
           members={activeMembers}
           myMemberId={myMemberId}
           onClose={() => setSheet(null)}
-          onSaved={() => { setSheet(null); void loadData(); }}
+          onSaved={() => { setSheet(null); flash("Expense added."); void loadData(); }}
           flash={flash}
         />
       )}
@@ -1340,6 +1341,45 @@ async function completeMoneyItem(id: string, reload: () => Promise<void>, flash:
 }
 
 // ---------------------------------------------------------------------------
+// HouseHeader — premium House identity card
+// Replaces the plain text header with a branded, informative header.
+// ---------------------------------------------------------------------------
+function HouseHeader({ house, memberCount, myMember, isOwner, onSwitchSpace, onOpenSettings }: {
+  house: House;
+  memberCount: number;
+  myMember: HouseMember | null;
+  isOwner: boolean;
+  onSwitchSpace: () => void;
+  onOpenSettings: () => void;
+}) {
+  const initial = myMember?.name.slice(0, 1).toUpperCase() ?? "?";
+  const subtitle = [
+    memberCount > 0 ? `${memberCount} member${memberCount !== 1 ? "s" : ""}` : null,
+    house.house_code,
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <header className="house-header">
+      {/* Left: House avatar + identity — tapping opens space switcher */}
+      <button className="house-identity" onClick={onSwitchSpace} aria-label="Switch space">
+        <div className="house-avatar" aria-hidden="true">🏡</div>
+        <div className="house-identity-text">
+          <span className="house-name">{house.name}</span>
+          {subtitle && <span className="house-subtitle">{subtitle}</span>}
+          {isOwner && <span className="house-role-badge">OWNER</span>}
+        </div>
+        <span className="house-chevron" aria-hidden="true">⌄</span>
+      </button>
+
+      {/* Right: user profile initial — tapping opens settings */}
+      <button className="bell" onClick={onOpenSettings} aria-label="Settings">
+        <span style={{ fontSize: 13, fontWeight: 800 }}>{initial}</span>
+      </button>
+    </header>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // House sub-components
 // ---------------------------------------------------------------------------
 
@@ -1397,15 +1437,31 @@ function HouseExpenseSheet({ houseId, members, myMemberId, onClose, onSaved, fla
     setSaving(true);
     const client = getSupabaseBrowserClient();
     const { error } = await client!.rpc("add_house_expense", {
-      input_house_id: houseId,
-      input_title:    title,
-      input_amount:   amount,
-      input_category: category,
-      input_date:     date,
-      input_paid_by:  paidBy,
+      input_house_id:  houseId,
+      input_title:     title,
+      input_amount:    amount,
+      input_category:  category,
+      input_date:      date,
+      input_paid_by:   paidBy,
+      // participant_ids must be sent explicitly so PostgREST can match the
+      // 7-param function signature in its schema cache. Passing null lets the
+      // DB default to all active members (equal split).
+      participant_ids: null,
     });
     setSaving(false);
-    if (error) { flash(error.message); return; }
+    if (error) {
+      if (process.env.NODE_ENV === "development") console.error("[add_house_expense]", error);
+      // Surface a human-readable message; hide raw Postgres detail from users.
+      const msg = error.message.includes("Not a house member")
+        ? "You are not an active member of this house."
+        : error.message.includes("title and positive amount")
+        ? "Enter a title and a positive amount."
+        : error.message.includes("Invalid payer")
+        ? "The selected payer is not an active house member."
+        : "Couldn't save the expense. Please try again.";
+      flash(msg);
+      return;
+    }
     onSaved();
   };
 
