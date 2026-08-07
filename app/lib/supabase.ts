@@ -27,3 +27,28 @@ export function getSupabaseBrowserClient() {
 
   return supabaseClient;
 }
+
+function getOAuthCallbackUrl(nextPath: string) {
+  if (typeof window === "undefined") {
+    throw new Error("OAuth can only start in a browser.");
+  }
+
+  // This intentionally uses the browser's active origin: localhost in local
+  // development and the current Vercel production domain after deployment.
+  const callbackUrl = new URL("/auth/callback", window.location.origin);
+  callbackUrl.searchParams.set("next", nextPath.startsWith("/") && !nextPath.startsWith("//") ? nextPath : "/");
+  return callbackUrl.toString();
+}
+
+export async function signInWithGoogle(nextPath = "/") {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase || typeof window === "undefined") {
+    throw new Error("Supabase is not configured.");
+  }
+
+  const { error } = await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: { redirectTo: getOAuthCallbackUrl(nextPath) },
+  });
+  if (error) throw error;
+}
