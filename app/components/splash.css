@@ -1,0 +1,250 @@
+/* ==========================================================================
+   NestSplit — AppSplash
+   Pure CSS animation, no external library.
+   All durations expressed as CSS custom properties so they cascade cleanly.
+
+   Timeline (normal motion)
+     0.00 – 0.50s  Stage 1 : Logo fades + scales in
+     0.50 – 1.40s  Stage 2 : Finance elements drift inward
+     1.40 – 2.00s  Stage 3 : Elements merge → logo bounce + glow ring
+     2.00 – 2.60s  Stage 4 : Wordmark + tagline reveal
+     2.60 – 3.00s  Stage 5 : Hold
+     3.00 – 3.35s  Outro   : Splash fades out, app fades in (driven by JS)
+   ========================================================================== */
+
+/* ── Overlay ──────────────────────────────────────────────────────────────── */
+.sp-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #fffdf9;
+  /* Safe-area: push content away from notch / home bar */
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* Outro: JS adds .sp-leaving which triggers this transition */
+  transition: opacity 320ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sp-overlay.sp-leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Stage root ──────────────────────────────────────────────────────────── */
+.sp-stage {
+  position: relative;
+  width: 160px;
+  height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Logo ────────────────────────────────────────────────────────────────── */
+.sp-logo {
+  position: relative;
+  z-index: 2;
+  width: 80px;
+  height: 80px;
+  border-radius: 26px;
+  background: #244c39;
+  display: grid;
+  place-items: center;
+  color: #c5f9a9;
+  font-size: 44px;
+  font-weight: 900;
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  letter-spacing: -0.04em;
+  /* Stage 1: enter */
+  animation: sp-logo-enter 480ms cubic-bezier(0.22, 1, 0.36, 1) 40ms both;
+  /* will-change keeps GPU-composited layers ready */
+  will-change: transform, opacity;
+}
+
+/* Stage 3 bounce fires after elements merge (delay ≈1.4s) */
+.sp-logo.sp-bounce {
+  animation:
+    sp-logo-enter 480ms cubic-bezier(0.22, 1, 0.36, 1) 40ms both,
+    sp-logo-bounce 500ms cubic-bezier(0.34, 1.56, 0.64, 1) 1400ms both;
+}
+
+@keyframes sp-logo-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.72);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0px);
+  }
+}
+
+@keyframes sp-logo-bounce {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.12); }
+  70%  { transform: scale(0.96); }
+  100% { transform: scale(1); }
+}
+
+/* ── Glow ring (Stage 3) ──────────────────────────────────────────────────── */
+.sp-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid #c5f9a9;
+  opacity: 0;
+  animation: sp-ring-expand 600ms cubic-bezier(0.22, 1, 0.36, 1) 1500ms both;
+  will-change: transform, opacity;
+}
+
+@keyframes sp-ring-expand {
+  from { opacity: 0.7; transform: scale(0.55); }
+  to   { opacity: 0;   transform: scale(1.45); }
+}
+
+/* Soft inner glow on logo (Stage 3) */
+.sp-logo-glow {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  border-radius: 26px;
+  background: #244c39;
+  opacity: 0;
+  filter: blur(18px);
+  z-index: 1;
+  animation: sp-glow-pulse 700ms ease-out 1420ms both;
+}
+
+@keyframes sp-glow-pulse {
+  0%   { opacity: 0;    transform: scale(0.9); }
+  45%  { opacity: 0.45; transform: scale(1.3); }
+  100% { opacity: 0;    transform: scale(1.1); }
+}
+
+/* ── Finance elements (Stage 2) ──────────────────────────────────────────── */
+/* Each element starts at its orbit position and travels inward to center,
+   fading out as it arrives (merged into the logo in Stage 3). */
+.sp-el {
+  position: absolute;
+  z-index: 3;
+  font-size: 22px;
+  line-height: 1;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+/* ₹ — top-left */
+.sp-el-rupee {
+  top: 4px;
+  left: 8px;
+  color: #244c39;
+  font-weight: 700;
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  animation: sp-el-rupee 900ms cubic-bezier(0.22, 1, 0.36, 1) 520ms both;
+}
+@keyframes sp-el-rupee {
+  0%   { opacity: 0; transform: translate(0px, 0px)   scale(0.7) rotate(-8deg); }
+  25%  { opacity: 1; }
+  80%  { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(36px, 32px) scale(0.4) rotate(0deg); }
+}
+
+/* 👤 person — top-right */
+.sp-el-person {
+  top: 4px;
+  right: 8px;
+  font-size: 20px;
+  animation: sp-el-person 900ms cubic-bezier(0.22, 1, 0.36, 1) 600ms both;
+}
+@keyframes sp-el-person {
+  0%   { opacity: 0; transform: translate(0px, 0px)    scale(0.7) rotate(6deg); }
+  25%  { opacity: 1; }
+  80%  { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(-34px, 30px) scale(0.4) rotate(0deg); }
+}
+
+/* 🧾 receipt — bottom-left */
+.sp-el-receipt {
+  bottom: 4px;
+  left: 8px;
+  font-size: 18px;
+  animation: sp-el-receipt 900ms cubic-bezier(0.22, 1, 0.36, 1) 680ms both;
+}
+@keyframes sp-el-receipt {
+  0%   { opacity: 0; transform: translate(0px, 0px)   scale(0.7) rotate(5deg); }
+  25%  { opacity: 1; }
+  80%  { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(34px, -30px) scale(0.4) rotate(0deg); }
+}
+
+/* 💳 card — bottom-right */
+.sp-el-card {
+  bottom: 4px;
+  right: 8px;
+  font-size: 18px;
+  animation: sp-el-card 900ms cubic-bezier(0.22, 1, 0.36, 1) 760ms both;
+}
+@keyframes sp-el-card {
+  0%   { opacity: 0; transform: translate(0px, 0px)    scale(0.7) rotate(-5deg); }
+  25%  { opacity: 1; }
+  80%  { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(-32px, -30px) scale(0.4) rotate(0deg); }
+}
+
+/* ── Wordmark (Stage 4) ──────────────────────────────────────────────────── */
+.sp-wordmark {
+  margin-top: 28px;
+  text-align: center;
+  animation: sp-wordmark-enter 500ms cubic-bezier(0.22, 1, 0.36, 1) 2020ms both;
+  will-change: transform, opacity;
+}
+
+@keyframes sp-wordmark-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.sp-wordmark-name {
+  font-size: 28px;
+  font-weight: 900;
+  letter-spacing: -0.8px;
+  color: #17201b;
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  line-height: 1;
+}
+
+.sp-wordmark-tagline {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #718076;
+  letter-spacing: 0.02em;
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  animation: sp-wordmark-enter 400ms cubic-bezier(0.22, 1, 0.36, 1) 2250ms both;
+}
+
+/* ── Reduced-motion variant ──────────────────────────────────────────────── */
+/* When the user prefers reduced motion we skip all movement and just do a
+   single fast fade-in of the complete branding. */
+@media (prefers-reduced-motion: reduce) {
+  .sp-logo,
+  .sp-logo.sp-bounce,
+  .sp-ring,
+  .sp-logo-glow,
+  .sp-el,
+  .sp-wordmark,
+  .sp-wordmark-tagline {
+    animation: sp-reduced-fadein 200ms ease both !important;
+  }
+  .sp-el { display: none !important; }
+}
+
+@keyframes sp-reduced-fadein {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}

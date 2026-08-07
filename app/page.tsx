@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient, signInWithGoogle } from "@/app/lib/supabase";
+import AppSplash from "@/app/components/AppSplash";
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -33,6 +34,34 @@ type MoneyItem = {
   due_date: string | null;
   status: "pending" | "paid" | "received" | "cancelled";
 };
+
+// ---------------------------------------------------------------------------
+// House types
+// ---------------------------------------------------------------------------
+type HouseMember = {
+  id: string;           // house_members.id (UUID)
+  profile_id: string | null;
+  name: string;
+  role: "owner" | "member";
+  active: boolean;
+};
+type HouseExpense = {
+  id: string;
+  title: string;
+  amount: number;
+  category: string;
+  expense_date: string;
+  paid_by: string;           // house_members.id of payer
+  paid_by_name: string;      // denormalised for display
+};
+type HouseSettlement = {
+  id: string;
+  from_member_id: string;
+  to_member_id: string;
+  amount: number;
+  settled_on: string;
+};
+type MemberBalance = HouseMember & { balance: number };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,6 +103,7 @@ export default function NestSplit() {
   const [houses, setHouses] = useState<House[]>([]);
   const [workspace, setWorkspace] = useState<Workspace>("selector");
   const [booting, setBooting] = useState(true);
+  const [splashDone, setSplashDone] = useState(false);
   const [error, setError] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [showJoin, setShowJoin] = useState(false);
@@ -195,72 +225,76 @@ export default function NestSplit() {
     setShowJoin(false);
   };
 
-  if (booting) return <main className="app-stage"><section className="phone-shell splash" aria-label="Loading"><div className="logo">N</div></section></main>;
-  if (!user) return <Welcome error={error} onPersonal={() => authenticate("personal")} onHouse={() => authenticate("house")} />;
+  if (booting && !splashDone) return (
+    <AppSplash authReady={false} onDone={() => setSplashDone(true)} />
+  );
+  if (!user) return (
+    <>
+      <AppSplash authReady={!booting} onDone={() => setSplashDone(true)} />
+      {splashDone && <Welcome error={error} onPersonal={() => authenticate("personal")} onHouse={() => authenticate("house")} />}
+    </>
+  );
 
   const activeHouse = workspace.startsWith("house:") ? houses.find((h) => h.id === workspace.slice(6)) : null;
 
   if (workspace === "selector") return (
     <>
-      <WorkspaceSelector
-        houses={houses}
-        onPersonal={() => selectWorkspace("personal")}
-        onHouse={(id) => selectWorkspace(`house:${id}`)}
-        onCreate={() => setShowCreate(true)}
-        onJoin={() => setShowJoin(true)}
-        onLogout={logout}
-        error={error}
-      />
-      {showCreate && (
-        <FormSheet title="Create House" onClose={() => setShowCreate(false)} onSubmit={createHouse}>
-          <label>House name<input name="name" required autoFocus placeholder="e.g. Greenview Flat" /></label>
-          <button className="sheet-submit">Create house</button>
-        </FormSheet>
-      )}
-      {showJoin && (
-        <FormSheet title="Join House" onClose={() => setShowJoin(false)} onSubmit={joinHouse}>
-          <label>House code<input name="code" required autoFocus placeholder="NX-ABC123" /></label>
-          <button className="sheet-submit">Join house</button>
-        </FormSheet>
-      )}
+      <AppSplash authReady={!booting} onDone={() => setSplashDone(true)} />
+      <div style={splashDone ? { animation: "ns-pop 280ms cubic-bezier(.2,.8,.2,1) both" } : { opacity: 0, pointerEvents: "none" }}>
+        <WorkspaceSelector
+          houses={houses}
+          onPersonal={() => selectWorkspace("personal")}
+          onHouse={(id) => selectWorkspace(`house:${id}`)}
+          onCreate={() => setShowCreate(true)}
+          onJoin={() => setShowJoin(true)}
+          onLogout={logout}
+          error={error}
+        />
+        {showCreate && (
+          <FormSheet title="Create House" onClose={() => setShowCreate(false)} onSubmit={createHouse}>
+            <label>House name<input name="name" required autoFocus placeholder="e.g. Greenview Flat" /></label>
+            <button className="sheet-submit">Create house</button>
+          </FormSheet>
+        )}
+        {showJoin && (
+          <FormSheet title="Join House" onClose={() => setShowJoin(false)} onSubmit={joinHouse}>
+            <label>House code<input name="code" required autoFocus placeholder="NX-ABC123" /></label>
+            <button className="sheet-submit">Join house</button>
+          </FormSheet>
+        )}
+      </div>
     </>
   );
 
   // Authenticated workspace — Personal or House
   return (
-    <main className="app-stage">
-      <section className="phone-shell">
-        {workspace === "personal" ? (
-          <PersonalApp user={user} onSwitchSpace={() => selectWorkspace("selector")} onLogout={logout} />
-        ) : (
-          <>
-            <header className="app-header">
-              <button className="space-title" onClick={() => selectWorkspace("selector")}>
-                <small>HOUSE</small>
-                <b>🏠 {activeHouse?.name ?? "House"} <i>⌄</i></b>
-              </button>
-              <button className="bell" onClick={logout} aria-label="Log out">↪</button>
-            </header>
-            <div className="content">
-              <HouseHome house={activeHouse!} />
-            </div>
-          </>
-        )}
-        {error && <div className="toast">{error}</div>}
-      </section>
-      {showCreate && (
-        <FormSheet title="Create House" onClose={() => setShowCreate(false)} onSubmit={createHouse}>
-          <label>House name<input name="name" required autoFocus placeholder="e.g. Greenview Flat" /></label>
-          <button className="sheet-submit">Create house</button>
-        </FormSheet>
-      )}
-      {showJoin && (
-        <FormSheet title="Join House" onClose={() => setShowJoin(false)} onSubmit={joinHouse}>
-          <label>House code<input name="code" required autoFocus placeholder="NX-ABC123" /></label>
-          <button className="sheet-submit">Join house</button>
-        </FormSheet>
-      )}
-    </main>
+    <>
+      <AppSplash authReady={!booting} onDone={() => setSplashDone(true)} />
+      <div style={splashDone ? { animation: "ns-pop 280ms cubic-bezier(.2,.8,.2,1) both" } : { opacity: 0, pointerEvents: "none" }}>
+        <main className="app-stage">
+          <section className="phone-shell">
+            {workspace === "personal" ? (
+              <PersonalApp user={user} onSwitchSpace={() => selectWorkspace("selector")} onLogout={logout} />
+            ) : (
+              <HouseApp house={activeHouse!} user={user} onSwitchSpace={() => selectWorkspace("selector")} onLogout={logout} />
+            )}
+            {error && <div className="toast">{error}</div>}
+          </section>
+          {showCreate && (
+            <FormSheet title="Create House" onClose={() => setShowCreate(false)} onSubmit={createHouse}>
+              <label>House name<input name="name" required autoFocus placeholder="e.g. Greenview Flat" /></label>
+              <button className="sheet-submit">Create house</button>
+            </FormSheet>
+          )}
+          {showJoin && (
+            <FormSheet title="Join House" onClose={() => setShowJoin(false)} onSubmit={joinHouse}>
+              <label>House code<input name="code" required autoFocus placeholder="NX-ABC123" /></label>
+              <button className="sheet-submit">Join house</button>
+            </FormSheet>
+          )}
+        </main>
+      </div>
+    </>
   );
 }
 
@@ -320,20 +354,367 @@ function WorkspaceSelector({ houses, onPersonal, onHouse, onCreate, onJoin, onLo
 }
 
 // ---------------------------------------------------------------------------
-// House placeholder (House UI is separate feature)
+// HouseApp — full shared-expense House application
+// Mirrors the PersonalApp pattern. Takes full shell ownership (header → nav).
+// All data scoped to house.id via Supabase RLS (is_house_member policy).
 // ---------------------------------------------------------------------------
-function HouseHome({ house }: { house: House }) {
+type HouseScreen = "home" | "activity" | "insights" | "settings";
+type HouseSheet = "expense" | "settlement" | "member" | null;
+
+// Pure balance calculation — mirrors the getBalances() function from git history
+// adapted to Supabase member/expense/settlement shapes.
+function calcBalances(
+  members: HouseMember[],
+  expenses: HouseExpense[],
+  settlements: HouseSettlement[],
+): MemberBalance[] {
+  const active = members.filter((m) => m.active);
+  const totals: Record<string, number> = {};
+  active.forEach((m) => { totals[m.id] = 0; });
+  expenses.forEach((e) => {
+    const share = active.length ? Number(e.amount) / active.length : 0;
+    totals[e.paid_by] = (totals[e.paid_by] ?? 0) + Number(e.amount);
+    active.forEach((m) => { totals[m.id] = (totals[m.id] ?? 0) - share; });
+  });
+  settlements.forEach((s) => {
+    totals[s.from_member_id] = (totals[s.from_member_id] ?? 0) + Number(s.amount);
+    totals[s.to_member_id]   = (totals[s.to_member_id]   ?? 0) - Number(s.amount);
+  });
+  return active.map((m) => ({ ...m, balance: Number((totals[m.id] ?? 0).toFixed(2)) }));
+}
+
+function HouseApp({ house, user, onSwitchSpace, onLogout }: {
+  house: House;
+  user: User;
+  onSwitchSpace: () => void;
+  onLogout: () => void;
+}) {
+  const [screen, setScreen]       = useState<HouseScreen>("home");
+  const [sheet, setSheet]         = useState<HouseSheet>(null);
+  const [notice, setNotice]       = useState("");
+  const [members, setMembers]     = useState<HouseMember[]>([]);
+  const [expenses, setExpenses]   = useState<HouseExpense[]>([]);
+  const [settlements, setSettlements] = useState<HouseSettlement[]>([]);
+  const [myMemberId, setMyMemberId]   = useState<string | null>(null);
+  const [loading, setLoading]     = useState(true);
+
+  const flash = (msg: string) => { setNotice(msg); window.setTimeout(() => setNotice(""), 2800); };
+
+  // Load all house data
+  const loadData = useCallback(async () => {
+    const client = getSupabaseBrowserClient();
+    if (!client) return;
+    const [membersRes, expensesRes, settlementsRes] = await Promise.all([
+      client
+        .from("house_members")
+        .select("id,profile_id,name,role,active")
+        .eq("house_id", house.id)
+        .order("joined_at", { ascending: true }),
+      client
+        .from("expenses")
+        .select("id,title,amount,category,expense_date,paid_by,house_members!paid_by(name)")
+        .eq("house_id", house.id)
+        .order("expense_date", { ascending: false })
+        .order("created_at", { ascending: false }),
+      client
+        .from("settlements")
+        .select("id,from_member_id,to_member_id,amount,settled_on")
+        .eq("house_id", house.id)
+        .order("settled_on", { ascending: false }),
+    ]);
+
+    if (membersRes.data) {
+      const rows = membersRes.data as (HouseMember & { profile_id: string | null })[];
+      setMembers(rows);
+      // Identify which member row belongs to the current auth user
+      const mine = rows.find((m) => m.profile_id === user.id);
+      setMyMemberId(mine?.id ?? null);
+    }
+    if (expensesRes.data) {
+      // Flatten the joined payer name from the nested relation
+      const rows = (expensesRes.data as Array<{
+        id: string; title: string; amount: number; category: string;
+        expense_date: string; paid_by: string;
+        house_members: { name: string } | { name: string }[] | null;
+      }>).map((r) => ({
+        id: r.id,
+        title: r.title,
+        amount: r.amount,
+        category: r.category,
+        expense_date: r.expense_date,
+        paid_by: r.paid_by,
+        paid_by_name: Array.isArray(r.house_members)
+          ? (r.house_members[0]?.name ?? "Member")
+          : (r.house_members?.name ?? "Member"),
+      }));
+      setExpenses(rows);
+    }
+    if (settlementsRes.data) setSettlements(settlementsRes.data as HouseSettlement[]);
+    setLoading(false);
+  }, [house.id, user.id]);
+
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void loadData(); }, [loadData]);
+
+  // Derived
+  const thisMonthKey    = new Date().toISOString().slice(0, 7);
+  const activeMembers   = useMemo(() => members.filter((m) => m.active), [members]);
+  const monthExpenses   = useMemo(() => expenses.filter((e) => e.expense_date.slice(0, 7) === thisMonthKey), [expenses, thisMonthKey]);
+  const monthTotal      = useMemo(() => monthExpenses.reduce((s, e) => s + Number(e.amount), 0), [monthExpenses]);
+  const balances        = useMemo(() => calcBalances(members, expenses, settlements), [members, expenses, settlements]);
+  const myBalance       = useMemo(() => balances.find((b) => b.id === myMemberId)?.balance ?? 0, [balances, myMemberId]);
+  const myMember        = useMemo(() => members.find((m) => m.id === myMemberId) ?? null, [members, myMemberId]);
+  const isOwner         = myMember?.role === "owner";
+  const currentMonthName = new Date().toLocaleDateString("en-IN", { month: "long" });
+
+  const categoryTotals  = useMemo(() => {
+    const map: Record<string, number> = {};
+    expenses.forEach((e) => { map[e.category] = (map[e.category] ?? 0) + Number(e.amount); });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [expenses]);
+
+  const monthlyTrend = useMemo(() => {
+    const map: Record<string, number> = {};
+    expenses.forEach((e) => {
+      const k = e.expense_date.slice(0, 7);
+      map[k] = (map[k] ?? 0) + Number(e.amount);
+    });
+    return Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).slice(-6);
+  }, [expenses]);
+
+  const recent = expenses.slice(0, 5);
+
+  if (loading) return (
+    <>
+      <header className="app-header">
+        <button className="space-title" onClick={onSwitchSpace}>
+          <small>HOUSE</small>
+          <b>🏠 {house.name} <i>⌄</i></b>
+        </button>
+        <button className="bell" onClick={onLogout} aria-label="Log out">↪</button>
+      </header>
+      <div className="content" style={{ paddingTop: 20 }}>
+        <p className="empty">Loading {house.name}…</p>
+      </div>
+    </>
+  );
+
   return (
     <>
-      <p className="eyebrow">HOUSE SPACE</p>
-      <h1 className="welcome-title">{house.name}</h1>
-      <section className="hero-card">
-        <p>SHARED SPACE</p>
-        <strong>Ready to split</strong>
-        <span>Invite members with code {house.house_code}</span>
-      </section>
-      <div className="section-title"><h2>House dashboard</h2></div>
-      <p className="empty">This House is ready for shared expenses.</p>
+      <header className="app-header">
+        <button className="space-title" onClick={onSwitchSpace}>
+          <small>HOUSE</small>
+          <b>🏠 {house.name} <i>⌄</i></b>
+        </button>
+        <button className="bell" onClick={() => setScreen("settings")} aria-label="Settings">
+          <span style={{ fontSize: 13, fontWeight: 800 }}>{myMember?.name.slice(0, 1).toUpperCase() ?? "H"}</span>
+        </button>
+      </header>
+
+      <div className="content">
+        {/* ── HOME ── */}
+        {screen === "home" && (
+          <>
+            <section className="hero-card">
+              <p>HOUSEHOLD EXPENSE</p>
+              <strong>{money(monthTotal)}</strong>
+              <span>{currentMonthName} · {activeMembers.length} members</span>
+              <div className="balance-chip">
+                <span>{myBalance >= 0 ? "You get back" : "You owe"}</span>
+                <b>{money(Math.abs(myBalance))}</b>
+              </div>
+            </section>
+
+            <div className="section-title">
+              <h2>Quick add</h2>
+              <button onClick={() => setSheet("expense")}>Add expense</button>
+            </div>
+            <button className="quick-add" onClick={() => setSheet("expense")}>
+              <span>＋</span>
+              <div><b>Record an expense</b><small>Split equally with the house</small></div>
+              <i>›</i>
+            </button>
+
+            <div className="section-title">
+              <h2>Recent expenses</h2>
+              <button onClick={() => setScreen("activity")}>See all</button>
+            </div>
+            <HouseExpenseList expenses={recent} members={members} />
+
+            {categoryTotals.length > 0 && (
+              <>
+                <div className="section-title"><h2>This month</h2></div>
+                <section className="summary-card">
+                  <div><small>Daily average</small><b>{money(monthTotal / Math.max(new Date().getDate(), 1))}</b></div>
+                  <div><small>Top category</small><b>{categoryTotals[0]?.[0] ?? "—"}</b></div>
+                </section>
+                <button className="insight-card" onClick={() => setScreen("insights")}>
+                  <span>✦</span>
+                  <div>
+                    <small>SMALL INSIGHT</small>
+                    <b>{categoryTotals[0] ? `${categoryTotals[0][0]} is the largest shared expense.` : "Add an expense to unlock insights."}</b>
+                  </div>
+                  <i>›</i>
+                </button>
+              </>
+            )}
+          </>
+        )}
+
+        {/* ── ACTIVITY ── */}
+        {screen === "activity" && (
+          <>
+            <p className="screen-copy">Every shared expense and settlement in one place.</p>
+            <div className="section-title"><h2>All expenses</h2><button onClick={() => setSheet("expense")}>Add</button></div>
+            <HouseExpenseList expenses={expenses} members={members} full />
+            <button className="secondary-action" onClick={() => setSheet("settlement")}>Record a settlement</button>
+          </>
+        )}
+
+        {/* ── INSIGHTS ── */}
+        {screen === "insights" && (
+          <>
+            <section className="insight-hero">
+              <small>MONTHLY SUMMARY</small>
+              <strong>{money(monthTotal)}</strong>
+              <span>{monthExpenses.length} expense{monthExpenses.length !== 1 ? "s" : ""} this month</span>
+            </section>
+            <div className="section-title"><h2>Spend by category</h2></div>
+            <section className="chart-card">
+              {categoryTotals.length
+                ? categoryTotals.map(([name, value]) => (
+                    <div className="bar-row" key={name}>
+                      <div><span>{name}</span><b>{money(value)}</b></div>
+                      <i><em style={{ width: `${Math.max(10, (value / categoryTotals[0][1]) * 100)}%` }} /></i>
+                    </div>
+                  ))
+                : <p className="empty">Your categories will appear here.</p>}
+            </section>
+            {monthlyTrend.length > 0 && (
+              <>
+                <div className="section-title"><h2>Monthly trend</h2></div>
+                <section className="chart-card">
+                  <MonthlyTrendBars data={monthlyTrend} />
+                </section>
+              </>
+            )}
+            <div className="section-title"><h2>Balances</h2></div>
+            <div className="balance-list">
+              {balances.map((b) => (
+                <div key={b.id}>
+                  <div className="mini-avatar">{b.name[0]?.toUpperCase()}</div>
+                  <span>{b.name}</span>
+                  <b className={b.balance >= 0 ? "positive" : "negative"}>
+                    {b.balance >= 0 ? "gets " : "owes "}{money(Math.abs(b.balance))}
+                  </b>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* ── SETTINGS ── */}
+        {screen === "settings" && (
+          <>
+            <section className="profile-card">
+              <div className="profile-avatar" style={{ fontSize: 22, fontWeight: 800 }}>
+                {myMember?.name.slice(0, 1).toUpperCase() ?? "H"}
+              </div>
+              <div>
+                <b>{myMember?.name ?? house.name}</b>
+                <small>{user.email} · {isOwner ? "Owner" : "Member"}</small>
+              </div>
+            </section>
+
+            {isOwner && (
+              <section className="members-card">
+                <div>
+                  <b>Members</b>
+                  <button onClick={() => setSheet("member")}>Add</button>
+                </div>
+                {activeMembers.map((m) => (
+                  <p key={m.id}>
+                    <span>
+                      {m.name}
+                      <small>{m.role === "owner" ? "Owner" : "Member"}</small>
+                    </span>
+                    {m.role === "member" && (
+                      <button onClick={() => void deactivateMember(house.id, m.id, loadData, flash)}>
+                        Deactivate
+                      </button>
+                    )}
+                  </p>
+                ))}
+              </section>
+            )}
+
+            <div className="setting-group">
+              <small>HOUSE</small>
+              <button onClick={() => flash(`House code: ${house.house_code}`)}><span>⌁</span>House code <b>{house.house_code}</b></button>
+              {isOwner && <button onClick={() => setSheet("member")}><span>＋</span>Manage members <b>{activeMembers.length}</b></button>}
+            </div>
+            <div className="setting-group">
+              <small>ACCOUNT</small>
+              <button onClick={onSwitchSpace}><span>⌁</span>Switch space <b>›</b></button>
+              <button onClick={onLogout}><span>↪</span>Log out <b>›</b></button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* FAB */}
+      <button className="fab" onClick={() => setSheet("expense")} aria-label="Add expense" style={{ display: "grid" }}>＋</button>
+
+      {/* Bottom navigation */}
+      <nav className="bottom-nav">
+        {([
+          ["home",     "⌂", "Home"],
+          ["activity", "◷", "Activity"],
+          ["add",      "＋", ""],
+          ["insights", "◔", "Insights"],
+          ["settings", "⚙", "Settings"],
+        ] as const).map(([key, icon, label]) => (
+          <button
+            key={key}
+            className={screen === key ? "active" : key === "add" ? "nav-add" : ""}
+            onClick={() => key === "add" ? setSheet("expense") : setScreen(key as HouseScreen)}
+          >
+            <i>{icon}</i>
+            {label && <span>{label}</span>}
+          </button>
+        ))}
+      </nav>
+
+      {/* Sheets */}
+      {sheet === "expense" && myMemberId && (
+        <HouseExpenseSheet
+          houseId={house.id}
+          members={activeMembers}
+          myMemberId={myMemberId}
+          onClose={() => setSheet(null)}
+          onSaved={() => { setSheet(null); void loadData(); }}
+          flash={flash}
+        />
+      )}
+      {sheet === "settlement" && myMemberId && (
+        <HouseSettlementSheet
+          houseId={house.id}
+          members={activeMembers}
+          myMemberId={myMemberId}
+          onClose={() => setSheet(null)}
+          onSaved={() => { setSheet(null); void loadData(); }}
+          flash={flash}
+        />
+      )}
+      {sheet === "member" && isOwner && (
+        <HouseMemberSheet
+          houseCode={house.house_code}
+          onClose={() => setSheet(null)}
+          flash={flash}
+        />
+      )}
+
+      {notice && <div className="toast">{notice}</div>}
     </>
   );
 }
@@ -955,5 +1336,218 @@ async function completeMoneyItem(id: string, reload: () => Promise<void>, flash:
   const { error } = await client.rpc("complete_personal_money_item", { item_id: id });
   if (error) { flash(error.message); return; }
   flash("Marked as done — transaction recorded.");
+  await reload();
+}
+
+// ---------------------------------------------------------------------------
+// House sub-components
+// ---------------------------------------------------------------------------
+
+function HouseExpenseList({ expenses, members, full = false }: {
+  expenses: HouseExpense[];
+  members: HouseMember[];
+  full?: boolean;
+}) {
+  if (!expenses.length) return <p className="empty">No expenses yet. Add the first one.</p>;
+  const nameById = Object.fromEntries(members.map((m) => [m.id, m.name]));
+  return (
+    <div className={full ? "expense-list full" : "expense-list"}>
+      {expenses.map((e) => (
+        <div className="expense-row" key={e.id}>
+          <div className="expense-icon">{e.category.slice(0, 1).toUpperCase()}</div>
+          <div>
+            <b>{e.title}</b>
+            <small>
+              {e.category} · Paid by {nameById[e.paid_by] ?? e.paid_by_name} ·{" "}
+              {new Date(e.expense_date + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+            </small>
+          </div>
+          <div><b>{money(Number(e.amount))}</b></div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// House — Add Expense sheet
+// Calls add_house_expense RPC which computes equal splits server-side.
+// ---------------------------------------------------------------------------
+const HOUSE_CATEGORIES = ["Food", "Rent", "Bills", "Transport", "Other"];
+
+function HouseExpenseSheet({ houseId, members, myMemberId, onClose, onSaved, flash }: {
+  houseId: string;
+  members: HouseMember[];
+  myMemberId: string;
+  onClose: () => void;
+  onSaved: () => void;
+  flash: (msg: string) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+
+  const save = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const form = new FormData(e.currentTarget);
+    const title    = String(form.get("title") || "").trim();
+    const amount   = Number(form.get("amount"));
+    const category = String(form.get("category") || "Other");
+    const date     = String(form.get("date") || todayStr());
+    const paidBy   = String(form.get("paid_by") || myMemberId);
+    if (!title || amount <= 0) { flash("Enter a title and a positive amount."); return; }
+    setSaving(true);
+    const client = getSupabaseBrowserClient();
+    const { error } = await client!.rpc("add_house_expense", {
+      input_house_id: houseId,
+      input_title:    title,
+      input_amount:   amount,
+      input_category: category,
+      input_date:     date,
+      input_paid_by:  paidBy,
+    });
+    setSaving(false);
+    if (error) { flash(error.message); return; }
+    onSaved();
+  };
+
+  return (
+    <div className="sheet-backdrop" onMouseDown={onClose}>
+      <section className="sheet" onMouseDown={(ev) => ev.stopPropagation()}>
+        <div className="sheet-handle" />
+        <div className="sheet-head">
+          <h2>Add expense</h2>
+          <button type="button" onClick={onClose}>×</button>
+        </div>
+        <form onSubmit={(ev) => { void save(ev); }}>
+          <label>What was it?<input name="title" placeholder="e.g. Groceries" autoFocus required /></label>
+          <label>Amount<input name="amount" type="number" inputMode="decimal" min="0.01" step="0.01" placeholder="0" required /></label>
+          <label>Category
+            <select name="category">
+              {HOUSE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <label>Paid by
+            <select name="paid_by" defaultValue={myMemberId}>
+              {members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </label>
+          <label>Date<input name="date" type="date" defaultValue={todayStr()} /></label>
+          <button className="sheet-submit" type="submit" disabled={saving}>{saving ? "Saving…" : "Add expense"}</button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// House — Record Settlement sheet
+// Calls record_house_settlement RPC.
+// ---------------------------------------------------------------------------
+function HouseSettlementSheet({ houseId, members, myMemberId, onClose, onSaved, flash }: {
+  houseId: string;
+  members: HouseMember[];
+  myMemberId: string;
+  onClose: () => void;
+  onSaved: () => void;
+  flash: (msg: string) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const others = members.filter((m) => m.id !== myMemberId);
+
+  const save = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const form   = new FormData(e.currentTarget);
+    const to     = String(form.get("to") || "");
+    const amount = Number(form.get("amount"));
+    const date   = String(form.get("date") || todayStr());
+    if (!to || amount <= 0) { flash("Choose who you paid and the amount."); return; }
+    setSaving(true);
+    const client = getSupabaseBrowserClient();
+    const { error } = await client!.rpc("record_house_settlement", {
+      input_house_id:      houseId,
+      recipient_member_id: to,
+      input_amount:        amount,
+      input_date:          date,
+    });
+    setSaving(false);
+    if (error) { flash(error.message); return; }
+    onSaved();
+  };
+
+  return (
+    <div className="sheet-backdrop" onMouseDown={onClose}>
+      <section className="sheet" onMouseDown={(ev) => ev.stopPropagation()}>
+        <div className="sheet-handle" />
+        <div className="sheet-head">
+          <h2>Record settlement</h2>
+          <button type="button" onClick={onClose}>×</button>
+        </div>
+        <p className="sheet-copy">Record money you paid to settle your balance.</p>
+        <form onSubmit={(ev) => { void save(ev); }}>
+          <label>Paid to
+            <select name="to">
+              <option value="">Select member</option>
+              {others.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </label>
+          <label>Amount<input name="amount" type="number" inputMode="decimal" min="0.01" step="0.01" placeholder="0" required /></label>
+          <label>Date<input name="date" type="date" defaultValue={todayStr()} /></label>
+          <button className="sheet-submit" type="submit" disabled={saving}>{saving ? "Saving…" : "Save settlement"}</button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// House — Add Member sheet (owner only)
+// Shows the house code so the owner can share it; new members join via
+// join_house_by_code or a house invite link — no PIN required.
+// ---------------------------------------------------------------------------
+function HouseMemberSheet({ houseCode, onClose, flash }: {
+  houseCode: string;
+  onClose: () => void;
+  flash: (msg: string) => void;
+}) {
+  const copied = () => {
+    void navigator.clipboard.writeText(houseCode).then(() => flash(`Code ${houseCode} copied to clipboard.`));
+  };
+
+  return (
+    <div className="sheet-backdrop" onMouseDown={onClose}>
+      <section className="sheet" onMouseDown={(ev) => ev.stopPropagation()}>
+        <div className="sheet-handle" />
+        <div className="sheet-head">
+          <h2>Invite members</h2>
+          <button type="button" onClick={onClose}>×</button>
+        </div>
+        <p className="sheet-copy">Share the house code with anyone you want to invite. They can join from the NestSplit app using this code.</p>
+        <div style={{ textAlign: "center", margin: "22px 0 8px" }}>
+          <p style={{ fontSize: 11, fontWeight: 800, color: "var(--muted)", letterSpacing: "0.1em", marginBottom: 10 }}>HOUSE CODE</p>
+          <p style={{ fontSize: 28, fontWeight: 900, letterSpacing: "0.08em", color: "var(--green)" }}>{houseCode}</p>
+        </div>
+        <button className="sheet-submit" type="button" onClick={copied}>Copy code</button>
+      </section>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// House — Deactivate member (owner only, via RPC)
+// ---------------------------------------------------------------------------
+async function deactivateMember(
+  houseId: string,
+  memberId: string,
+  reload: () => Promise<void>,
+  flash: (msg: string) => void,
+) {
+  const client = getSupabaseBrowserClient();
+  if (!client) return;
+  const { error } = await client.rpc("set_house_member_active", {
+    input_house_id:  houseId,
+    input_member_id: memberId,
+    input_active:    false,
+  });
+  if (error) { flash(error.message); return; }
+  flash("Member deactivated.");
   await reload();
 }
