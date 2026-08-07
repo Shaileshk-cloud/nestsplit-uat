@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient, signInWithGoogle } from "@/app/lib/supabase";
 import AppSplash from "@/app/components/AppSplash";
+import HouseSmartSplit from "@/app/components/HouseSmartSplit";
+import HouseNotifications from "@/app/components/HouseNotifications";
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -45,6 +47,11 @@ type HouseMember = {
   role: "owner" | "member";
   active: boolean;
 };
+// One row from expense_splits — amount is what that member owes for the expense.
+type ExpenseSplit = {
+  member_id: string;
+  amount: number;
+};
 type HouseExpense = {
   id: string;
   title: string;
@@ -53,6 +60,9 @@ type HouseExpense = {
   expense_date: string;
   paid_by: string;           // house_members.id of payer
   paid_by_name: string;      // denormalised for display
+  // Splits loaded with each expense. May be empty for legacy expenses that
+  // pre-date expense_splits (those fall back to equal-share in calcBalances).
+  splits: ExpenseSplit[];
 };
 type HouseSettlement = {
   id: string;
@@ -361,26 +371,78 @@ function WorkspaceSelector({ houses, onPersonal, onHouse, onCreate, onJoin, onLo
 type HouseScreen = "home" | "activity" | "insights" | "settings";
 type HouseSheet = "expense" | "settlement" | "member" | null;
 
-// Pure balance calculation — mirrors the getBalances() function from git history
-// adapted to Supabase member/expense/settlement shapes.
+// ---------------------------------------------------------------------------
+// Balance calculation — uses actual expense_splits for correctness.
+//
+// Sign convention:
+//   positive balance → this member is owed money ("You get back")
+//   negative balance → this member owes money ("You owe")
+//
+// For each expense:
+//   payer.balance += expense.amount           (they fronted the cash)
+//   each split member.balance -= split.amount (they owe their share)
+//
+// Verified example — ₹900, paid by A, splits A=300 B=300 C=300:
+//   A: +900 - 300 = +600  ✓
+//   B:       - 300 = -300  ✓
+//   C:       - 300 = -300  ✓
+//   sum = 0  ✓
+//
+// Legacy fallback: if an expense has no splits recorded (pre-v2 data),
+// fall back to equal division across all active members so old data
+// continues to display sensible balances.
+// ---------------------------------------------------------------------------
 function calcBalances(
   members: HouseMember[],
   expenses: HouseExpense[],
   settlements: HouseSettlement[],
 ): MemberBalance[] {
   const active = members.filter((m) => m.active);
-  const totals: Record<string, number> = {};
-  active.forEach((m) => { totals[m.id] = 0; });
+  // Work in integer paise to avoid floating-point drift
+  const totals: Record<string, bigint> = {};
+  active.forEach((m) => { totals[m.id] = BigInt(0); });
+
   expenses.forEach((e) => {
-    const share = active.length ? Number(e.amount) / active.length : 0;
-    totals[e.paid_by] = (totals[e.paid_by] ?? 0) + Number(e.amount);
-    active.forEach((m) => { totals[m.id] = (totals[m.id] ?? 0) - share; });
+    const amountPaise = BigInt(Math.round(Number(e.amount) * 100));
+
+    // Credit the payer the full amount
+    if (totals[e.paid_by] !== undefined) {
+      totals[e.paid_by] += amountPaise;
+    }
+
+    if (e.splits.length > 0) {
+      // Use actual recorded splits
+      e.splits.forEach((s) => {
+        if (totals[s.member_id] !== undefined) {
+          totals[s.member_id] -= BigInt(Math.round(Number(s.amount) * 100));
+        }
+      });
+    } else {
+      // Legacy fallback: equal share across active members
+      const n = active.length;
+      if (n > 0) {
+        const sharePaise = amountPaise / BigInt(n);
+        const remainder  = amountPaise - sharePaise * BigInt(n);
+        active.forEach((m, idx) => {
+          const share = idx === n - 1 ? sharePaise + remainder : sharePaise;
+          totals[m.id] -= share;
+        });
+      }
+    }
   });
+
+  // Apply settlements
   settlements.forEach((s) => {
-    totals[s.from_member_id] = (totals[s.from_member_id] ?? 0) + Number(s.amount);
-    totals[s.to_member_id]   = (totals[s.to_member_id]   ?? 0) - Number(s.amount);
+    const amt = BigInt(Math.round(Number(s.amount) * 100));
+    if (totals[s.from_member_id] !== undefined) totals[s.from_member_id] += amt;
+    if (totals[s.to_member_id]   !== undefined) totals[s.to_member_id]   -= amt;
   });
-  return active.map((m) => ({ ...m, balance: Number((totals[m.id] ?? 0).toFixed(2)) }));
+
+  // Convert back to INR with 2 decimal places
+  return active.map((m) => ({
+    ...m,
+    balance: Number(totals[m.id]) / 100,
+  }));
 }
 
 function HouseApp({ house, user, onSwitchSpace, onLogout }: {
@@ -397,6 +459,9 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
   const [settlements, setSettlements] = useState<HouseSettlement[]>([]);
   const [myMemberId, setMyMemberId]   = useState<string | null>(null);
   const [loading, setLoading]     = useState(true);
+  // Notification state
+  const [notifOpen,    setNotifOpen]    = useState(false);
+  const [unreadCount,  setUnreadCount]  = useState(0);
 
   const flash = (msg: string) => { setNotice(msg); window.setTimeout(() => setNotice(""), 2800); };
 
@@ -410,9 +475,20 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         .select("id,profile_id,name,role,active")
         .eq("house_id", house.id)
         .order("joined_at", { ascending: true }),
+      // Fetch expense_splits nested so we avoid N+1 queries.
+      // Supabase returns the nested array under the FK alias key.
       client
         .from("expenses")
-        .select("id,title,amount,category,expense_date,paid_by,house_members!paid_by(name)")
+        .select(`
+          id,
+          title,
+          amount,
+          category,
+          expense_date,
+          paid_by,
+          house_members!paid_by(name),
+          expense_splits(member_id, amount)
+        `)
         .eq("house_id", house.id)
         .order("expense_date", { ascending: false })
         .order("created_at", { ascending: false }),
@@ -426,17 +502,21 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
     if (membersRes.data) {
       const rows = membersRes.data as (HouseMember & { profile_id: string | null })[];
       setMembers(rows);
-      // Identify which member row belongs to the current auth user
       const mine = rows.find((m) => m.profile_id === user.id);
       setMyMemberId(mine?.id ?? null);
     }
     if (expensesRes.data) {
-      // Flatten the joined payer name from the nested relation
-      const rows = (expensesRes.data as Array<{
-        id: string; title: string; amount: number; category: string;
-        expense_date: string; paid_by: string;
+      type RawExpenseRow = {
+        id: string;
+        title: string;
+        amount: number;
+        category: string;
+        expense_date: string;
+        paid_by: string;
         house_members: { name: string } | { name: string }[] | null;
-      }>).map((r) => ({
+        expense_splits: { member_id: string; amount: number }[] | null;
+      };
+      const rows = (expensesRes.data as RawExpenseRow[]).map((r) => ({
         id: r.id,
         title: r.title,
         amount: r.amount,
@@ -446,6 +526,10 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         paid_by_name: Array.isArray(r.house_members)
           ? (r.house_members[0]?.name ?? "Member")
           : (r.house_members?.name ?? "Member"),
+        splits: (r.expense_splits ?? []).map((s) => ({
+          member_id: s.member_id,
+          amount: Number(s.amount),
+        })),
       }));
       setExpenses(rows);
     }
@@ -493,6 +577,8 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         isOwner={false}
         onSwitchSpace={onSwitchSpace}
         onOpenSettings={() => {/* loading */}}
+        unreadCount={unreadCount}
+        onOpenNotifications={() => setNotifOpen(true)}
       />
       <div className="content" style={{ paddingTop: 20 }}>
         <p className="empty">Loading {house.name}…</p>
@@ -509,6 +595,8 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         isOwner={isOwner}
         onSwitchSpace={onSwitchSpace}
         onOpenSettings={() => setScreen("settings")}
+        unreadCount={unreadCount}
+        onOpenNotifications={() => setNotifOpen(true)}
       />
 
       <div className="content">
@@ -531,7 +619,7 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
             </div>
             <button className="quick-add" onClick={() => setSheet("expense")}>
               <span>＋</span>
-              <div><b>Record an expense</b><small>Split equally with the house</small></div>
+              <div><b>Record an expense</b><small>Choose how to split it</small></div>
               <i>›</i>
             </button>
 
@@ -688,7 +776,7 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
 
       {/* Sheets */}
       {sheet === "expense" && myMemberId && (
-        <HouseExpenseSheet
+        <HouseSmartSplit
           houseId={house.id}
           members={activeMembers}
           myMemberId={myMemberId}
@@ -714,6 +802,17 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
           flash={flash}
         />
       )}
+
+      {/* Notification panel — rendered inside the phone shell so it
+          inherits the safe-area and rounded corners of the shell */}
+      <HouseNotifications
+        userId={user.id}
+        houseId={house.id}
+        open={notifOpen}
+        onClose={() => setNotifOpen(false)}
+        onUnreadCount={setUnreadCount}
+        onNavigate={(screen) => setScreen(screen)}
+      />
 
       {notice && <div className="toast">{notice}</div>}
     </>
@@ -1342,15 +1441,18 @@ async function completeMoneyItem(id: string, reload: () => Promise<void>, flash:
 
 // ---------------------------------------------------------------------------
 // HouseHeader — premium House identity card
-// Replaces the plain text header with a branded, informative header.
 // ---------------------------------------------------------------------------
-function HouseHeader({ house, memberCount, myMember, isOwner, onSwitchSpace, onOpenSettings }: {
+// HouseHeader — premium House identity card with notification bell
+// ---------------------------------------------------------------------------
+function HouseHeader({ house, memberCount, myMember, isOwner, onSwitchSpace, onOpenSettings, unreadCount, onOpenNotifications }: {
   house: House;
   memberCount: number;
   myMember: HouseMember | null;
   isOwner: boolean;
   onSwitchSpace: () => void;
   onOpenSettings: () => void;
+  unreadCount: number;
+  onOpenNotifications: () => void;
 }) {
   const initial = myMember?.name.slice(0, 1).toUpperCase() ?? "?";
   const subtitle = [
@@ -1371,10 +1473,29 @@ function HouseHeader({ house, memberCount, myMember, isOwner, onSwitchSpace, onO
         <span className="house-chevron" aria-hidden="true">⌄</span>
       </button>
 
-      {/* Right: user profile initial — tapping opens settings */}
-      <button className="bell" onClick={onOpenSettings} aria-label="Settings">
-        <span style={{ fontSize: 13, fontWeight: 800 }}>{initial}</span>
-      </button>
+      {/* Right side: notification bell + profile avatar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        {/* Notification bell with unread badge */}
+        <div className="nb-bell-wrap">
+          <button
+            className="bell"
+            onClick={onOpenNotifications}
+            aria-label={unreadCount > 0 ? `${unreadCount} unread notifications` : "Notifications"}
+          >
+            <span aria-hidden="true">🔔</span>
+          </button>
+          {unreadCount > 0 && (
+            <span className="nb-badge" aria-hidden="true">
+              {unreadCount > 99 ? "99+" : unreadCount}
+            </span>
+          )}
+        </div>
+
+        {/* Profile initial — opens Settings */}
+        <button className="bell" onClick={onOpenSettings} aria-label="Settings">
+          <span style={{ fontSize: 13, fontWeight: 800 }}>{initial}</span>
+        </button>
+      </div>
     </header>
   );
 }
@@ -1405,91 +1526,6 @@ function HouseExpenseList({ expenses, members, full = false }: {
           <div><b>{money(Number(e.amount))}</b></div>
         </div>
       ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// House — Add Expense sheet
-// Calls add_house_expense RPC which computes equal splits server-side.
-// ---------------------------------------------------------------------------
-const HOUSE_CATEGORIES = ["Food", "Rent", "Bills", "Transport", "Other"];
-
-function HouseExpenseSheet({ houseId, members, myMemberId, onClose, onSaved, flash }: {
-  houseId: string;
-  members: HouseMember[];
-  myMemberId: string;
-  onClose: () => void;
-  onSaved: () => void;
-  flash: (msg: string) => void;
-}) {
-  const [saving, setSaving] = useState(false);
-
-  const save = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const form = new FormData(e.currentTarget);
-    const title    = String(form.get("title") || "").trim();
-    const amount   = Number(form.get("amount"));
-    const category = String(form.get("category") || "Other");
-    const date     = String(form.get("date") || todayStr());
-    const paidBy   = String(form.get("paid_by") || myMemberId);
-    if (!title || amount <= 0) { flash("Enter a title and a positive amount."); return; }
-    setSaving(true);
-    const client = getSupabaseBrowserClient();
-    const { error } = await client!.rpc("add_house_expense", {
-      input_house_id:  houseId,
-      input_title:     title,
-      input_amount:    amount,
-      input_category:  category,
-      input_date:      date,
-      input_paid_by:   paidBy,
-      // participant_ids must be sent explicitly so PostgREST can match the
-      // 7-param function signature in its schema cache. Passing null lets the
-      // DB default to all active members (equal split).
-      participant_ids: null,
-    });
-    setSaving(false);
-    if (error) {
-      if (process.env.NODE_ENV === "development") console.error("[add_house_expense]", error);
-      // Surface a human-readable message; hide raw Postgres detail from users.
-      const msg = error.message.includes("Not a house member")
-        ? "You are not an active member of this house."
-        : error.message.includes("title and positive amount")
-        ? "Enter a title and a positive amount."
-        : error.message.includes("Invalid payer")
-        ? "The selected payer is not an active house member."
-        : "Couldn't save the expense. Please try again.";
-      flash(msg);
-      return;
-    }
-    onSaved();
-  };
-
-  return (
-    <div className="sheet-backdrop" onMouseDown={onClose}>
-      <section className="sheet" onMouseDown={(ev) => ev.stopPropagation()}>
-        <div className="sheet-handle" />
-        <div className="sheet-head">
-          <h2>Add expense</h2>
-          <button type="button" onClick={onClose}>×</button>
-        </div>
-        <form onSubmit={(ev) => { void save(ev); }}>
-          <label>What was it?<input name="title" placeholder="e.g. Groceries" autoFocus required /></label>
-          <label>Amount<input name="amount" type="number" inputMode="decimal" min="0.01" step="0.01" placeholder="0" required /></label>
-          <label>Category
-            <select name="category">
-              {HOUSE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </label>
-          <label>Paid by
-            <select name="paid_by" defaultValue={myMemberId}>
-              {members.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-            </select>
-          </label>
-          <label>Date<input name="date" type="date" defaultValue={todayStr()} /></label>
-          <button className="sheet-submit" type="submit" disabled={saving}>{saving ? "Saving…" : "Add expense"}</button>
-        </form>
-      </section>
     </div>
   );
 }

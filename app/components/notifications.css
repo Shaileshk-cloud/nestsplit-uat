@@ -1,0 +1,264 @@
+/* ==========================================================================
+   NestSplit — House Notification Bell + Panel
+   All classes prefixed .nb- (notification bell) or .np- (notification panel)
+   to avoid collision with globals.css.
+   ========================================================================== */
+
+/* ── Bell button wrapper ─────────────────────────────────────────────────── */
+.nb-bell-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* The bell button itself reuses .bell from globals.css but we augment it */
+.nb-bell-wrap .bell {
+  position: relative;
+}
+
+/* Unread count badge — sits top-right of the bell button */
+.nb-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 10px;
+  background: #c65348;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 17px;
+  text-align: center;
+  pointer-events: none;
+  /* Subtle pop-in animation when badge first appears */
+  animation: nb-badge-pop 220ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes nb-badge-pop {
+  from { transform: scale(0.4); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+/* ── Panel overlay ───────────────────────────────────────────────────────── */
+/* Full-height backdrop — same pattern as .sheet-backdrop in globals.css */
+.np-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  background: rgba(16, 32, 22, 0.38);
+  display: flex;
+  align-items: flex-end;
+  animation: np-fade-in 180ms ease both;
+}
+
+@keyframes np-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Panel sheet — slides up from bottom */
+.np-panel {
+  background: var(--paper);
+  border-radius: 25px 25px 0 0;
+  width: 100%;
+  max-height: 80dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: np-slide-up 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@keyframes np-slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0);    }
+}
+
+/* Drag handle */
+.np-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 8px;
+  background: #d8ded5;
+  margin: 10px auto 0;
+  flex-shrink: 0;
+}
+
+/* Panel header row */
+.np-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 10px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.np-head h2 {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.4px;
+  margin: 0;
+}
+
+.np-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* "Mark all read" text button */
+.np-mark-all {
+  border: 0;
+  background: transparent;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+
+/* Close ×  button */
+.np-close {
+  border: 0;
+  background: #eff3ec;
+  border-radius: 50%;
+  height: 29px;
+  width: 29px;
+  font-size: 20px;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  line-height: 1;
+}
+
+/* ── Scrollable list ─────────────────────────────────────────────────────── */
+.np-list {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  flex: 1;
+  padding: 6px 0 12px;
+}
+
+/* Date group label (TODAY / YESTERDAY / earlier date) */
+.np-date-label {
+  font-size: 9px;
+  font-weight: 900;
+  color: var(--muted);
+  letter-spacing: 0.12em;
+  padding: 12px 20px 4px;
+}
+
+/* ── Notification card ───────────────────────────────────────────────────── */
+.np-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 20px;
+  cursor: pointer;
+  transition: background 140ms ease;
+  position: relative;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+}
+
+/* Unread card has a very light green tint */
+.np-card--unread {
+  background: #f4fbf0;
+}
+
+.np-card:active,
+.np-card:hover {
+  background: #edf5ea;
+}
+
+/* Green dot for unread */
+.np-unread-dot {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+}
+
+/* Emoji / icon badge */
+.np-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  background: #e8f4e4;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+/* Card body — title + body text + timestamp */
+.np-body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.np-title {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.np-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.np-time {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.np-empty {
+  padding: 48px 20px;
+  text-align: center;
+}
+
+.np-empty-icon {
+  font-size: 40px;
+  margin-bottom: 12px;
+}
+
+.np-empty-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 6px;
+}
+
+.np-empty-body {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .np-backdrop,
+  .np-panel,
+  .nb-badge { animation: none; }
+}

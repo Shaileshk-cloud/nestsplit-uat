@@ -1,0 +1,245 @@
+/* ==========================================================================
+   HouseSmartSplit sheet styles
+   All class names are prefixed .ss- to avoid collision with globals.css
+   ========================================================================== */
+
+/* Allow the sheet to scroll when content is tall (many participants) */
+.ss-sheet {
+  max-height: 92dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Extra bottom padding so submit button clears the home indicator */
+  padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ── Label / input base ──────────────────────────────────────────────────── */
+.ss-label {
+  display: grid;
+  gap: 5px;
+  font-size: 11px;
+  color: #5d6c60;
+  font-weight: 800;
+  margin-bottom: 12px;
+}
+
+.ss-input {
+  border: 1px solid #dde3dc;
+  border-radius: 12px;
+  padding: 12px;
+  background: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  outline-color: #6d9f77;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.ss-input:focus {
+  border-color: var(--green);
+}
+
+/* ── Two-column rows ─────────────────────────────────────────────────────── */
+.ss-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.ss-grow {
+  /* Used when one column should stretch a bit more */
+}
+
+/* ── Section heading ─────────────────────────────────────────────────────── */
+.ss-section-title {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  margin: 14px 0 8px;
+}
+
+/* ── Participant toggle chips ────────────────────────────────────────────── */
+.ss-participants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ss-participant {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px 7px 7px;
+  border-radius: 22px;
+  border: 1.5px solid #dde3dc;
+  background: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+  min-height: 40px;
+}
+
+.ss-participant--on {
+  background: #e6f6da;
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.ss-participant-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #dce7d8;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 900;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.ss-participant--on .ss-participant-avatar {
+  background: var(--green);
+  color: var(--mint);
+}
+
+.ss-participant-name {
+  max-width: 70px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ss-participant-check {
+  font-size: 11px;
+  color: var(--green);
+  margin-left: 1px;
+}
+
+/* ── Split mode tabs ─────────────────────────────────────────────────────── */
+.ss-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.ss-mode-tab {
+  padding: 9px 4px;
+  border-radius: 10px;
+  border: 1.5px solid #dde3dc;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.ss-mode-tab--active {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+
+/* ── Allocation rows ─────────────────────────────────────────────────────── */
+.ss-allocation {
+  background: #f3f7f1;
+  border-radius: 16px;
+  padding: 4px 14px 8px;
+}
+
+.ss-alloc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid #e8ede6;
+  min-height: 46px;
+}
+
+.ss-alloc-row:last-of-type {
+  border-bottom: none;
+}
+
+.ss-alloc-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--green);
+  color: var(--mint);
+  font-size: 13px;
+  font-weight: 900;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.ss-alloc-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Read-only amount for equal mode */
+.ss-alloc-amount {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* Editable input for exact/percentage/shares */
+.ss-alloc-input {
+  width: 76px;
+  flex-shrink: 0;
+  border: 1px solid #dde3dc;
+  border-radius: 10px;
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  background: #fff;
+  text-align: right;
+  outline-color: #6d9f77;
+  /* Remove native number spinners */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.ss-alloc-input::-webkit-inner-spin-button,
+.ss-alloc-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+/* Derived preview (percentage / shares mode) */
+.ss-alloc-preview {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+  min-width: 52px;
+  text-align: right;
+}
+
+/* ── Allocation summary line ─────────────────────────────────────────────── */
+.ss-alloc-summary {
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+  padding: 9px 0 2px;
+  letter-spacing: 0.02em;
+}
+
+.ss-alloc-summary--ok  { color: var(--green); }
+.ss-alloc-summary--err { color: #bf5d51; }
+
+/* ── Reduced-motion guard ─────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .ss-participant,
+  .ss-mode-tab,
+  .ss-input { transition: none; }
+}
