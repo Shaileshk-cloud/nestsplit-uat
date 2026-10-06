@@ -17,19 +17,19 @@
   display: grid;
   gap: 5px;
   font-size: 11px;
-  color: #5d6c60;
+  color: var(--muted);
   font-weight: 800;
   margin-bottom: 12px;
 }
 
 .ss-input {
-  border: 1px solid #dde3dc;
+  border: 1px solid var(--ns-input-line);
   border-radius: 12px;
   padding: 12px;
-  background: #fff;
+  background: var(--ns-surface);
   font-size: 14px;
   font-family: inherit;
-  outline-color: #6d9f77;
+  outline-color: var(--ns-focus);
   width: 100%;
   box-sizing: border-box;
 }
@@ -72,8 +72,8 @@
   gap: 6px;
   padding: 7px 11px 7px 7px;
   border-radius: 22px;
-  border: 1.5px solid #dde3dc;
-  background: #fff;
+  border: 1.5px solid var(--ns-input-line);
+  background: var(--ns-surface);
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
@@ -83,7 +83,7 @@
 }
 
 .ss-participant--on {
-  background: #e6f6da;
+  background: var(--ns-brand-weak);
   border-color: var(--green);
   color: var(--green);
 }
@@ -92,7 +92,7 @@
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: #dce7d8;
+  background: var(--ns-surface-2);
   color: var(--green);
   font-size: 12px;
   font-weight: 900;
@@ -130,8 +130,8 @@
 .ss-mode-tab {
   padding: 9px 4px;
   border-radius: 10px;
-  border: 1.5px solid #dde3dc;
-  background: #fff;
+  border: 1.5px solid var(--ns-input-line);
+  background: var(--ns-surface);
   font-size: 12px;
   font-weight: 800;
   color: var(--muted);
@@ -147,7 +147,7 @@
 
 /* ── Allocation rows ─────────────────────────────────────────────────────── */
 .ss-allocation {
-  background: #f3f7f1;
+  background: var(--ns-surface-2);
   border-radius: 16px;
   padding: 4px 14px 8px;
 }
@@ -157,7 +157,7 @@
   align-items: center;
   gap: 10px;
   padding: 9px 0;
-  border-bottom: 1px solid #e8ede6;
+  border-bottom: 1px solid var(--line);
   min-height: 46px;
 }
 
@@ -200,14 +200,14 @@
 .ss-alloc-input {
   width: 76px;
   flex-shrink: 0;
-  border: 1px solid #dde3dc;
+  border: 1px solid var(--ns-input-line);
   border-radius: 10px;
   padding: 7px 9px;
   font-size: 13px;
   font-family: inherit;
-  background: #fff;
+  background: var(--ns-surface);
   text-align: right;
-  outline-color: #6d9f77;
+  outline-color: var(--ns-focus);
   /* Remove native number spinners */
   appearance: textfield;
   -moz-appearance: textfield;
@@ -235,7 +235,9 @@
 }
 
 .ss-alloc-summary--ok  { color: var(--green); }
-.ss-alloc-summary--err { color: #bf5d51; }
+.ss-alloc-summary--err { color: var(--ns-neg); }
+
+/* Destructive delete uses the shared .sheet-delete primitive (globals.css). */
 
 /* ── Reduced-motion guard ─────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {

@@ -25,6 +25,12 @@ type Transaction = {
 // ---------------------------------------------------------------------------
 const money = (value: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value || 0);
+const monthLabel = (key: string) => new Date(`${key}-01T12:00:00`).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+const monthShortLabel = (key: string) => new Date(`${key}-01T12:00:00`).toLocaleDateString("en-IN", { month: "short", year: "numeric" });
+const previousMonthKey = (key: string) => {
+  const [year, month] = key.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 7);
+};
 
 // ---------------------------------------------------------------------------
 // Page
@@ -33,6 +39,7 @@ export default function InsightsPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState("");
+  const [selectedMonthKey, setSelectedMonthKey] = useState(() => new Date().toISOString().slice(0, 7));
 
   useEffect(() => {
     const client = getSupabaseBrowserClient();
@@ -65,12 +72,35 @@ export default function InsightsPage() {
     });
     return [...map.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
-      .slice(-6)
       .map(([key, total]) => ({
+        key,
         month: new Date(`${key}-01T00:00:00`).toLocaleDateString("en-IN", { month: "short" }),
         total,
       }));
   }, [transactions]);
+
+  const monthOptions = useMemo(() => {
+    const keys = new Set(monthly.map((item) => item.key));
+    const currentMonthKey = new Date().toISOString().slice(0, 7);
+    keys.add(currentMonthKey);
+    keys.add(previousMonthKey(currentMonthKey));
+    return [...keys].sort((a, b) => a.localeCompare(b)).slice(-6);
+  }, [monthly]);
+
+  const activeMonthKey = monthOptions.includes(selectedMonthKey) ? selectedMonthKey : (monthOptions.at(-1) ?? new Date().toISOString().slice(0, 7));
+  const monthlyByKey = useMemo(() => new Map(monthly.map((item) => [item.key, item])), [monthly]);
+  const selectedMonth = monthlyByKey.get(activeMonthKey) ?? {
+    key: activeMonthKey,
+    month: monthShortLabel(activeMonthKey),
+    total: 0,
+  };
+  const priorMonthKey = previousMonthKey(activeMonthKey);
+  const priorMonth = monthlyByKey.get(priorMonthKey) ?? {
+    key: priorMonthKey,
+    month: monthShortLabel(priorMonthKey),
+    total: 0,
+  };
+  const comparison = [priorMonth, selectedMonth];
 
   // ── Category breakdown (all time) ──
   const categories = useMemo(() => {
@@ -82,8 +112,6 @@ export default function InsightsPage() {
   }, [transactions]);
 
   // ── Current vs previous month comparison ──
-  const comparison = monthly.slice(-2);
-
   // ── This month stats ──
   const thisMonthKey = new Date().toISOString().slice(0, 7);
   const thisMonthTotal = useMemo(
@@ -120,9 +148,22 @@ export default function InsightsPage() {
               <div className="chart-title">
                 <div>
                   <small>MONTHLY COMPARISON</small>
-                  <h2>{comparison[1]?.month || "Current"} vs {comparison[0]?.month || "Previous"}</h2>
+                  <h2>{monthLabel(activeMonthKey)} vs {monthLabel(priorMonthKey)}</h2>
                 </div>
-                <b>{comparison[1] ? money(comparison[1].total) : "—"}</b>
+                <select
+                  value={activeMonthKey}
+                  onChange={(event) => setSelectedMonthKey(event.target.value)}
+                  aria-label="Select month"
+                  style={{ border: "1px solid var(--ns-line)", borderRadius: 10, padding: "8px 10px", background: "var(--ns-surface)", color: "var(--ns-ink)", fontSize: 12, fontWeight: 700 }}
+                >
+                  {monthOptions.map((key) => (
+                    <option key={key} value={key}>{monthShortLabel(key)}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 8, color: "var(--muted)", fontSize: 12 }}>
+                <span>{monthLabel(priorMonthKey)} · {money(priorMonth.total)}</span>
+                <b style={{ color: "var(--ns-brand)" }}>{money(selectedMonth.total)}</b>
               </div>
               <div className="chart-area">
                 <ResponsiveContainer width="100%" height="100%">

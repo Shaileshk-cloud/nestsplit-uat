@@ -6,11 +6,13 @@ import { getSupabaseBrowserClient, signInWithGoogle } from "@/app/lib/supabase";
 import AppSplash from "@/app/components/AppSplash";
 import HouseSmartSplit from "@/app/components/HouseSmartSplit";
 import HouseNotifications from "@/app/components/HouseNotifications";
+import HouseSharedNote from "@/app/components/HouseSharedNote";
+import { calcBalances } from "@/app/lib/balances";
 
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------
-type House = { id: string; name: string; house_code: string };
+type House = { id: string; name: string; house_code: string; joining_enabled: boolean };
 type Workspace = "personal" | "selector" | `house:${string}`;
 
 // ---------------------------------------------------------------------------
@@ -35,6 +37,10 @@ type MoneyItem = {
   notes: string | null;
   due_date: string | null;
   status: "pending" | "paid" | "received" | "cancelled";
+  // Set when the item is completed (complete_personal_money_item creates a
+  // transaction and links it). FK is on-delete-restrict, so a linked item
+  // cannot be deleted — we gate the delete affordance on this being null.
+  linked_transaction_id: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +66,8 @@ type HouseExpense = {
   expense_date: string;
   paid_by: string;           // house_members.id of payer
   paid_by_name: string;      // denormalised for display
+  created_by: string | null; // house_members.id of creator (for edit/delete gating)
+  edited_at: string | null;  // set by update_house_expense_v2 (light audit trail)
   // Splits loaded with each expense. May be empty for legacy expenses that
   // pre-date expense_splits (those fall back to equal-share in calcBalances).
   splits: ExpenseSplit[];
@@ -80,6 +88,12 @@ const workspaceKey = (userId: string) => `nestsplit:last-workspace:${userId}`;
 const money = (value: number) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value || 0);
 const todayStr = () => new Date().toISOString().slice(0, 10);
+const monthLabel = (key: string) => new Date(`${key}-01T12:00:00`).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+const monthShortLabel = (key: string) => new Date(`${key}-01T12:00:00`).toLocaleDateString("en-IN", { month: "short", year: "numeric" });
+const previousMonthKey = (key: string) => {
+  const [year, month] = key.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 2, 1)).toISOString().slice(0, 7);
+};
 const INIT_TIMEOUT_MS = 8000;
 
 function withTimeout<T>(work: PromiseLike<T>, label: string): Promise<T> {
@@ -154,7 +168,7 @@ export default function NestSplit() {
         if (profileCreateError) throw profileCreateError;
       }
       const { data, error: housesError } = await withTimeout(
-        client.from("house_members").select("houses(id,name,house_code)").eq("profile_id", activeUser.id).eq("active", true),
+        client.from("house_members").select("houses(id,name,house_code,joining_enabled)").eq("profile_id", activeUser.id).eq("active", true),
         "Workspace loading",
       );
       if (housesError) throw housesError;
@@ -168,6 +182,13 @@ export default function NestSplit() {
       const intentKey = `nestsplit:consumed-intent:${activeUser.id}:${requestedIntent}`;
       const intent = requestedIntent && !window.sessionStorage.getItem(intentKey) ? requestedIntent : null;
       if (intent) window.sessionStorage.setItem(intentKey, "1");
+      // Strip ?intent= from the address bar once read, preserving any other
+      // params + hash, so a manual reload/share doesn't re-trigger it.
+      if (requestedIntent) {
+        params.delete("intent");
+        const qs = params.toString();
+        window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash);
+      }
       const saved = validWorkspace(window.localStorage.getItem(workspaceKey(activeUser.id)), activeHouses);
       const next: Workspace =
         intent === "personal" ? "personal"
@@ -288,7 +309,7 @@ export default function NestSplit() {
             ) : (
               <HouseApp house={activeHouse!} user={user} onSwitchSpace={() => selectWorkspace("selector")} onLogout={logout} />
             )}
-            {error && <div className="toast">{error}</div>}
+            {error && <div className="toast" role="alert">{error}</div>}
           </section>
           {showCreate && (
             <FormSheet title="Create House" onClose={() => setShowCreate(false)} onSubmit={createHouse}>
@@ -357,7 +378,7 @@ function WorkspaceSelector({ houses, onPersonal, onHouse, onCreate, onJoin, onLo
           <button className="outline" onClick={onJoin}>Join House</button>
           <button className="text-button" onClick={onLogout}>Log out</button>
         </div>
-        {error && <div className="toast">{error}</div>}
+        {error && <div className="toast" role="alert">{error}</div>}
       </section>
     </main>
   );
@@ -368,82 +389,16 @@ function WorkspaceSelector({ houses, onPersonal, onHouse, onCreate, onJoin, onLo
 // Mirrors the PersonalApp pattern. Takes full shell ownership (header → nav).
 // All data scoped to house.id via Supabase RLS (is_house_member policy).
 // ---------------------------------------------------------------------------
-type HouseScreen = "home" | "activity" | "insights" | "settings";
+type HouseScreen = "home" | "activity" | "notes" | "insights" | "settings";
 type HouseSheet = "expense" | "settlement" | "member" | null;
 
 // ---------------------------------------------------------------------------
-// Balance calculation — uses actual expense_splits for correctness.
-//
-// Sign convention:
-//   positive balance → this member is owed money ("You get back")
-//   negative balance → this member owes money ("You owe")
-//
-// For each expense:
-//   payer.balance += expense.amount           (they fronted the cash)
-//   each split member.balance -= split.amount (they owe their share)
-//
-// Verified example — ₹900, paid by A, splits A=300 B=300 C=300:
-//   A: +900 - 300 = +600  ✓
-//   B:       - 300 = -300  ✓
-//   C:       - 300 = -300  ✓
-//   sum = 0  ✓
-//
-// Legacy fallback: if an expense has no splits recorded (pre-v2 data),
-// fall back to equal division across all active members so old data
-// continues to display sensible balances.
+// Balance calculation lives in app/lib/balances.ts — extracted so it is unit
+// tested (balances.test.ts) and so the deactivation fix (a removed member's
+// credit/debit is retained, keeping balances zero-sum) has regression coverage.
+// It returns every member passed in (active + inactive) with a `balance`.
 // ---------------------------------------------------------------------------
-function calcBalances(
-  members: HouseMember[],
-  expenses: HouseExpense[],
-  settlements: HouseSettlement[],
-): MemberBalance[] {
-  const active = members.filter((m) => m.active);
-  // Work in integer paise to avoid floating-point drift
-  const totals: Record<string, bigint> = {};
-  active.forEach((m) => { totals[m.id] = BigInt(0); });
 
-  expenses.forEach((e) => {
-    const amountPaise = BigInt(Math.round(Number(e.amount) * 100));
-
-    // Credit the payer the full amount
-    if (totals[e.paid_by] !== undefined) {
-      totals[e.paid_by] += amountPaise;
-    }
-
-    if (e.splits.length > 0) {
-      // Use actual recorded splits
-      e.splits.forEach((s) => {
-        if (totals[s.member_id] !== undefined) {
-          totals[s.member_id] -= BigInt(Math.round(Number(s.amount) * 100));
-        }
-      });
-    } else {
-      // Legacy fallback: equal share across active members
-      const n = active.length;
-      if (n > 0) {
-        const sharePaise = amountPaise / BigInt(n);
-        const remainder  = amountPaise - sharePaise * BigInt(n);
-        active.forEach((m, idx) => {
-          const share = idx === n - 1 ? sharePaise + remainder : sharePaise;
-          totals[m.id] -= share;
-        });
-      }
-    }
-  });
-
-  // Apply settlements
-  settlements.forEach((s) => {
-    const amt = BigInt(Math.round(Number(s.amount) * 100));
-    if (totals[s.from_member_id] !== undefined) totals[s.from_member_id] += amt;
-    if (totals[s.to_member_id]   !== undefined) totals[s.to_member_id]   -= amt;
-  });
-
-  // Convert back to INR with 2 decimal places
-  return active.map((m) => ({
-    ...m,
-    balance: Number(totals[m.id]) / 100,
-  }));
-}
 
 function HouseApp({ house, user, onSwitchSpace, onLogout }: {
   house: House;
@@ -453,7 +408,9 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
 }) {
   const [screen, setScreen]       = useState<HouseScreen>("home");
   const [sheet, setSheet]         = useState<HouseSheet>(null);
+  const [editingExpense, setEditingExpense] = useState<HouseExpense | null>(null);
   const [notice, setNotice]       = useState("");
+  const [selectedMonthKey, setSelectedMonthKey] = useState(() => new Date().toISOString().slice(0, 7));
   const [members, setMembers]     = useState<HouseMember[]>([]);
   const [expenses, setExpenses]   = useState<HouseExpense[]>([]);
   const [settlements, setSettlements] = useState<HouseSettlement[]>([]);
@@ -463,7 +420,10 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
   const [notifOpen,    setNotifOpen]    = useState(false);
   const [unreadCount,  setUnreadCount]  = useState(0);
 
-  const flash = (msg: string) => { setNotice(msg); window.setTimeout(() => setNotice(""), 2800); };
+  const flash = useCallback((msg: string) => {
+    setNotice(msg);
+    window.setTimeout(() => setNotice(""), 2800);
+  }, []);
 
   // Load all house data
   const loadData = useCallback(async () => {
@@ -486,6 +446,8 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
           category,
           expense_date,
           paid_by,
+          created_by,
+          edited_at,
           house_members!paid_by(name),
           expense_splits(member_id, amount)
         `)
@@ -513,6 +475,8 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         category: string;
         expense_date: string;
         paid_by: string;
+        created_by: string | null;
+        edited_at: string | null;
         house_members: { name: string } | { name: string }[] | null;
         expense_splits: { member_id: string; amount: number }[] | null;
       };
@@ -523,6 +487,8 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         category: r.category,
         expense_date: r.expense_date,
         paid_by: r.paid_by,
+        created_by: r.created_by,
+        edited_at: r.edited_at,
         paid_by_name: Array.isArray(r.house_members)
           ? (r.house_members[0]?.name ?? "Member")
           : (r.house_members?.name ?? "Member"),
@@ -534,8 +500,13 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
       setExpenses(rows);
     }
     if (settlementsRes.data) setSettlements(settlementsRes.data as HouseSettlement[]);
+    const loadError = membersRes.error ?? expensesRes.error ?? settlementsRes.error;
+    if (loadError) {
+      if (process.env.NODE_ENV === "development") console.error("[HouseApp.loadData]", loadError);
+      flash("Couldn't load the latest house data. Check your connection and try again.");
+    }
     setLoading(false);
-  }, [house.id, user.id]);
+  }, [house.id, user.id, flash]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadData(); }, [loadData]);
@@ -543,13 +514,61 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
   // Derived
   const thisMonthKey    = new Date().toISOString().slice(0, 7);
   const activeMembers   = useMemo(() => members.filter((m) => m.active), [members]);
-  const monthExpenses   = useMemo(() => expenses.filter((e) => e.expense_date.slice(0, 7) === thisMonthKey), [expenses, thisMonthKey]);
-  const monthTotal      = useMemo(() => monthExpenses.reduce((s, e) => s + Number(e.amount), 0), [monthExpenses]);
+  const monthExpenses   = useMemo(
+    () => expenses.filter((e) => e.expense_date.slice(0, 7) === thisMonthKey),
+    [expenses, thisMonthKey],
+  );
+  const monthTotal      = useMemo(
+    () => monthExpenses.reduce((sum, expense) => sum + Number(expense.amount), 0),
+    [monthExpenses],
+  );
+  const monthOptions = useMemo(() => {
+    const keys = new Set(expenses.map((e) => e.expense_date.slice(0, 7)));
+    let key = thisMonthKey;
+    for (let index = 0; index < 6; index += 1) {
+      keys.add(key);
+      key = previousMonthKey(key);
+    }
+    return [...keys].sort((a, b) => b.localeCompare(a)).slice(0, 6);
+  }, [expenses, thisMonthKey]);
+  const activeSelectedMonthKey = monthOptions.includes(selectedMonthKey) ? selectedMonthKey : (monthOptions[0] ?? thisMonthKey);
+  const selectedMonthExpenses = useMemo(
+    () => expenses.filter((e) => e.expense_date.slice(0, 7) === activeSelectedMonthKey),
+    [expenses, activeSelectedMonthKey],
+  );
+  const selectedMonthTotal = useMemo(
+    () => selectedMonthExpenses.reduce((s, e) => s + Number(e.amount), 0),
+    [selectedMonthExpenses],
+  );
+  const selectedMonthLabel = monthLabel(activeSelectedMonthKey);
+  const selectedMonthCount = selectedMonthExpenses.length;
   const balances        = useMemo(() => calcBalances(members, expenses, settlements), [members, expenses, settlements]);
   const myBalance       = useMemo(() => balances.find((b) => b.id === myMemberId)?.balance ?? 0, [balances, myMemberId]);
+  // Show every active member; keep a removed member visible only while they
+  // still carry a non-zero balance, so nobody's debt silently vanishes (#1).
+  const visibleBalances = useMemo(
+    () => balances.filter((b) => b.active || Math.abs(b.balance) >= 0.005),
+    [balances],
+  );
   const myMember        = useMemo(() => members.find((m) => m.id === myMemberId) ?? null, [members, myMemberId]);
   const isOwner         = myMember?.role === "owner";
   const currentMonthName = new Date().toLocaleDateString("en-IN", { month: "long" });
+
+  // Edit/delete gating: the expense creator or any house owner may edit (the
+  // update/delete RPCs re-enforce this server-side — this just decides whether
+  // to surface the tappable affordance).
+  const canEditExpense = useCallback(
+    (e: HouseExpense) => isOwner || (myMemberId != null && e.created_by === myMemberId),
+    [isOwner, myMemberId],
+  );
+  const openEditExpense = useCallback((e: HouseExpense) => {
+    setEditingExpense(e);
+    setSheet("expense");
+  }, []);
+  const openAddExpense = useCallback(() => {
+    setEditingExpense(null);
+    setSheet("expense");
+  }, []);
 
   const categoryTotals  = useMemo(() => {
     const map: Record<string, number> = {};
@@ -557,14 +576,22 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
   }, [expenses]);
 
+  const selectedMonthCategoryTotals = useMemo(() => {
+    const map: Record<string, number> = {};
+    selectedMonthExpenses.forEach((e) => {
+      map[e.category] = (map[e.category] ?? 0) + Number(e.amount);
+    });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  }, [selectedMonthExpenses]);
+
   const monthlyTrend = useMemo(() => {
     const map: Record<string, number> = {};
     expenses.forEach((e) => {
       const k = e.expense_date.slice(0, 7);
       map[k] = (map[k] ?? 0) + Number(e.amount);
     });
-    return Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).slice(-6);
-  }, [expenses]);
+    return [...monthOptions].reverse().map((key) => [key, map[key] ?? 0] as [string, number]);
+  }, [expenses, monthOptions]);
 
   const recent = expenses.slice(0, 5);
 
@@ -615,9 +642,9 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
 
             <div className="section-title">
               <h2>Quick add</h2>
-              <button onClick={() => setSheet("expense")}>Add expense</button>
+              <button onClick={openAddExpense}>Add expense</button>
             </div>
-            <button className="quick-add" onClick={() => setSheet("expense")}>
+            <button className="quick-add" onClick={openAddExpense}>
               <span>＋</span>
               <div><b>Record an expense</b><small>Choose how to split it</small></div>
               <i>›</i>
@@ -627,7 +654,24 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
               <h2>Recent expenses</h2>
               <button onClick={() => setScreen("activity")}>See all</button>
             </div>
-            <HouseExpenseList expenses={recent} members={members} />
+            <HouseExpenseList expenses={recent} members={members} onEdit={openEditExpense} canEdit={canEditExpense} />
+
+            {settlements.length > 0 && (
+              <>
+                <div className="section-title">
+                  <h2>Recent settlements</h2>
+                  <button onClick={() => setScreen("activity")}>See all</button>
+                </div>
+                <HouseSettlementList settlements={settlements.slice(0, 3)} members={members} />
+              </>
+            )}
+
+            {settlements.length > 0 && (
+              <>
+                <div className="section-title"><h2>Recent settlements</h2><button onClick={() => setScreen("activity")}>See all</button></div>
+                <HouseSettlementList settlements={settlements.slice(0, 3)} members={members} />
+              </>
+            )}
 
             {categoryTotals.length > 0 && (
               <>
@@ -653,45 +697,69 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         {screen === "activity" && (
           <>
             <p className="screen-copy">Every shared expense and settlement in one place.</p>
-            <div className="section-title"><h2>All expenses</h2><button onClick={() => setSheet("expense")}>Add</button></div>
-            <HouseExpenseList expenses={expenses} members={members} full />
+            <div className="section-title"><h2>Settlements</h2></div>
+            <HouseSettlementList settlements={settlements} members={members} />
+            <div className="section-title"><h2>All expenses</h2><button onClick={openAddExpense}>Add</button></div>
+            <HouseExpenseList expenses={expenses} members={members} full onEdit={openEditExpense} canEdit={canEditExpense} />
             <button className="secondary-action" onClick={() => setSheet("settlement")}>Record a settlement</button>
           </>
         )}
 
         {/* ── INSIGHTS ── */}
+        {screen === "notes" && <HouseSharedNote houseId={house.id} userId={user.id} />}
+
         {screen === "insights" && (
           <>
             <section className="insight-hero">
-              <small>MONTHLY SUMMARY</small>
-              <strong>{money(monthTotal)}</strong>
-              <span>{monthExpenses.length} expense{monthExpenses.length !== 1 ? "s" : ""} this month</span>
+              <small>{selectedMonthLabel.toUpperCase()}</small>
+              <strong>{money(selectedMonthTotal)}</strong>
+              <span>{selectedMonthCount} expense{selectedMonthCount !== 1 ? "s" : ""} in {selectedMonthLabel}</span>
             </section>
-            <div className="section-title"><h2>Spend by category</h2></div>
             <section className="chart-card">
-              {categoryTotals.length
-                ? categoryTotals.map(([name, value]) => (
+              <div className="chart-title" style={{ marginBottom: 10 }}>
+                <div>
+                  <small>MONTH</small>
+                  <h2>{selectedMonthLabel}</h2>
+                </div>
+                <select
+                  value={activeSelectedMonthKey}
+                  onChange={(event) => setSelectedMonthKey(event.target.value)}
+                  aria-label="Select month"
+                  style={{ border: "1px solid var(--line)", borderRadius: 10, padding: "8px 10px", background: "var(--paper)", color: "var(--ink)", fontSize: 12, fontWeight: 700 }}
+                >
+                  {monthOptions.map((key) => (
+                    <option key={key} value={key}>{monthShortLabel(key)}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="section-title" style={{ marginTop: 0 }}><h2>Spend by category</h2></div>
+              {selectedMonthCategoryTotals.length
+                ? selectedMonthCategoryTotals.map(([name, value]) => (
                     <div className="bar-row" key={name}>
                       <div><span>{name}</span><b>{money(value)}</b></div>
-                      <i><em style={{ width: `${Math.max(10, (value / categoryTotals[0][1]) * 100)}%` }} /></i>
+                      <i><em style={{ width: `${Math.max(10, (value / selectedMonthCategoryTotals[0][1]) * 100)}%` }} /></i>
                     </div>
                   ))
-                : <p className="empty">Your categories will appear here.</p>}
+                : <p className="empty">Your categories will appear for {selectedMonthLabel}.</p>}
             </section>
             {monthlyTrend.length > 0 && (
               <>
                 <div className="section-title"><h2>Monthly trend</h2></div>
                 <section className="chart-card">
-                  <MonthlyTrendBars data={monthlyTrend} />
+                  <MonthlyTrendBars
+                    data={monthlyTrend}
+                    selectedMonth={activeSelectedMonthKey}
+                    onSelectMonth={setSelectedMonthKey}
+                  />
                 </section>
               </>
             )}
             <div className="section-title"><h2>Balances</h2></div>
             <div className="balance-list">
-              {balances.map((b) => (
+              {visibleBalances.map((b) => (
                 <div key={b.id}>
                   <div className="mini-avatar">{b.name[0]?.toUpperCase()}</div>
-                  <span>{b.name}</span>
+                  <span>{b.name}{!b.active && <em className="removed-tag"> · removed</em>}</span>
                   <b className={b.balance >= 0 ? "positive" : "negative"}>
                     {b.balance >= 0 ? "gets " : "owes "}{money(Math.abs(b.balance))}
                   </b>
@@ -741,6 +809,7 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
               <button onClick={() => flash(`House code: ${house.house_code}`)}><span>⌁</span>House code <b>{house.house_code}</b></button>
               {isOwner && <button onClick={() => setSheet("member")}><span>＋</span>Manage members <b>{activeMembers.length}</b></button>}
             </div>
+            <ThemeSetting />
             <div className="setting-group">
               <small>ACCOUNT</small>
               <button onClick={onSwitchSpace}><span>⌁</span>Switch space <b>›</b></button>
@@ -759,6 +828,7 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         {([
           ["home",     "⌂", "Home"],
           ["activity", "◷", "Activity"],
+          ["notes",    "N", "Notes"],
           ["add",      "＋", ""],
           ["insights", "◔", "Insights"],
           ["settings", "⚙", "Settings"],
@@ -766,7 +836,7 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
           <button
             key={key}
             className={screen === key ? "active" : key === "add" ? "nav-add" : ""}
-            onClick={() => key === "add" ? setSheet("expense") : setScreen(key as HouseScreen)}
+            onClick={() => key === "add" ? openAddExpense() : setScreen(key as HouseScreen)}
           >
             <i>{icon}</i>
             {label && <span>{label}</span>}
@@ -780,8 +850,17 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
           houseId={house.id}
           members={activeMembers}
           myMemberId={myMemberId}
-          onClose={() => setSheet(null)}
-          onSaved={() => { setSheet(null); flash("Expense added."); void loadData(); }}
+          editing={editingExpense ? {
+            id: editingExpense.id,
+            title: editingExpense.title,
+            amount: Number(editingExpense.amount),
+            category: editingExpense.category,
+            expense_date: editingExpense.expense_date,
+            paid_by: editingExpense.paid_by,
+            splits: editingExpense.splits,
+          } : undefined}
+          onClose={() => { setSheet(null); setEditingExpense(null); }}
+          onSaved={() => { setSheet(null); setEditingExpense(null); void loadData(); }}
           flash={flash}
         />
       )}
@@ -791,7 +870,12 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
           members={activeMembers}
           myMemberId={myMemberId}
           onClose={() => setSheet(null)}
-          onSaved={() => { setSheet(null); void loadData(); }}
+          onSaved={(settlement) => {
+            setSettlements((current) => [settlement, ...current.filter((item) => item.id !== settlement.id)]);
+            setSheet(null);
+            setScreen("activity");
+            void loadData();
+          }}
           flash={flash}
         />
       )}
@@ -814,7 +898,7 @@ function HouseApp({ house, user, onSwitchSpace, onLogout }: {
         onNavigate={(screen) => setScreen(screen)}
       />
 
-      {notice && <div className="toast">{notice}</div>}
+      {notice && <div className="toast" role="status" aria-live="polite">{notice}</div>}
     </>
   );
 }
@@ -910,7 +994,10 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
 }) {
   const [screen, setScreen] = useState<PersonalScreen>("home");
   const [sheet, setSheet] = useState<PersonalSheet>(null);
+  const [editingTx, setEditingTx] = useState<PersonalTransaction | null>(null);
+  const [editingMi, setEditingMi] = useState<MoneyItem | null>(null);
   const [notice, setNotice] = useState("");
+  const [selectedMonthKey, setSelectedMonthKey] = useState(() => new Date().toISOString().slice(0, 7));
   const [transactions, setTransactions] = useState<PersonalTransaction[]>([]);
   const [moneyItems, setMoneyItems] = useState<MoneyItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -920,7 +1007,17 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
   const firstName = displayName.split(" ")[0];
   const avatarLetter = firstName[0]?.toUpperCase() ?? "U";
 
-  const flash = (msg: string) => { setNotice(msg); window.setTimeout(() => setNotice(""), 2800); };
+  const flash = useCallback((msg: string) => {
+    setNotice(msg);
+    window.setTimeout(() => setNotice(""), 2800);
+  }, []);
+
+  // Sheet entrypoints. "open…" clears any prior editing target so the
+  // add-buttons never inherit a stale edit; "openEdit…" seeds it.
+  const openAddTransaction  = useCallback(() => { setEditingTx(null); setSheet("transaction"); }, []);
+  const openEditTransaction = useCallback((t: PersonalTransaction) => { setEditingTx(t); setSheet("transaction"); }, []);
+  const openAddMoneyItem    = useCallback(() => { setEditingMi(null); setSheet("money_item"); }, []);
+  const openEditMoneyItem   = useCallback((m: MoneyItem) => { setEditingMi(m); setSheet("money_item"); }, []);
 
   // Load all personal data
   const loadData = useCallback(async () => {
@@ -935,18 +1032,31 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
         .order("created_at", { ascending: false }),
       client
         .from("personal_money_items")
-        .select("id,direction,person_name,phone,amount,reason,notes,due_date,status")
+        .select("id,direction,person_name,phone,amount,reason,notes,due_date,status,linked_transaction_id")
         .eq("user_id", user.id)
         .in("status", ["pending"])
         .order("due_date", { ascending: true }),
     ]);
     if (txRes.data) setTransactions(txRes.data as PersonalTransaction[]);
     if (miRes.data) setMoneyItems(miRes.data as MoneyItem[]);
+    const loadError = txRes.error ?? miRes.error;
+    if (loadError) {
+      if (process.env.NODE_ENV === "development") console.error("[PersonalApp.loadData]", loadError);
+      flash("Couldn't load your latest data. Check your connection and try again.");
+    }
     setLoading(false);
-  }, [user.id]);
+  }, [user.id, flash]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void loadData(); }, [loadData]);
+
+  // Materialize "money due" reminders for this session. The RPC is idempotent
+  // (on conflict do nothing), so re-running it never errors or duplicates (#4).
+  useEffect(() => {
+    const client = getSupabaseBrowserClient();
+    if (!client) return;
+    void client.rpc("refresh_my_money_reminders");
+  }, [user.id]);
 
   // Derived stats
   const thisMonthKey = new Date().toISOString().slice(0, 7);
@@ -975,6 +1085,31 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
     });
     return Object.entries(map).sort(([a], [b]) => a.localeCompare(b)).slice(-6);
   }, [transactions]);
+
+  const activeSelectedMonthKey = useMemo(() => {
+    const currentMonthKey = new Date().toISOString().slice(0, 7);
+    return monthlyTrend.some(([key]) => key === selectedMonthKey)
+      ? selectedMonthKey
+      : currentMonthKey;
+  }, [monthlyTrend, selectedMonthKey]);
+  const selectedMonthTx = useMemo(
+    () => transactions.filter((t) => t.transaction_date.slice(0, 7) === activeSelectedMonthKey),
+    [transactions, activeSelectedMonthKey],
+  );
+  const selectedMonthSpent = useMemo(
+    () => selectedMonthTx
+      .filter((t) => t.transaction_kind === "expense")
+      .reduce((sum, t) => sum + Number(t.amount), 0),
+    [selectedMonthTx],
+  );
+  const selectedMonthCategoryTotals = useMemo(() => {
+    const totals: Record<string, number> = {};
+    selectedMonthTx.filter((t) => t.transaction_kind === "expense").forEach((t) => {
+      totals[t.category] = (totals[t.category] ?? 0) + Number(t.amount);
+    });
+    return Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  }, [selectedMonthTx]);
+  const selectedMonthLabel = monthLabel(activeSelectedMonthKey);
 
   const recent = transactions.slice(0, 5);
   const currentMonthName = new Date().toLocaleDateString("en-IN", { month: "long" });
@@ -1020,9 +1155,9 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
 
             <div className="section-title">
               <h2>Quick add</h2>
-              <button onClick={() => setSheet("transaction")}>Add transaction</button>
+              <button onClick={openAddTransaction}>Add transaction</button>
             </div>
-            <button className="quick-add" onClick={() => setSheet("transaction")}>
+            <button className="quick-add" onClick={openAddTransaction}>
               <span>＋</span>
               <div><b>Record a transaction</b><small>Expense or income, all yours</small></div>
               <i>›</i>
@@ -1032,7 +1167,7 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
               <>
                 <div className="section-title">
                   <h2>Give / Get</h2>
-                  <button onClick={() => setSheet("money_item")}>Add</button>
+                  <button onClick={openAddMoneyItem}>Add</button>
                 </div>
                 <MoneyItemList items={moneyItems.slice(0, 3)} onComplete={(id) => void completeMoneyItem(id, loadData, flash)} />
               </>
@@ -1041,9 +1176,9 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
               <>
                 <div className="section-title">
                   <h2>Give / Get</h2>
-                  <button onClick={() => setSheet("money_item")}>Add</button>
+                  <button onClick={openAddMoneyItem}>Add</button>
                 </div>
-                <button className="quick-add" onClick={() => setSheet("money_item")}>
+                <button className="quick-add" onClick={openAddMoneyItem}>
                   <span>⇄</span>
                   <div><b>Track money you owe or are owed</b><small>Set due dates and get reminders</small></div>
                   <i>›</i>
@@ -1083,11 +1218,11 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
             <p className="screen-copy">Every transaction in one place, private to you.</p>
             {moneyItems.length > 0 && (
               <>
-                <div className="section-title"><h2>Pending Give / Get</h2><button onClick={() => setSheet("money_item")}>Add</button></div>
+                <div className="section-title"><h2>Pending Give / Get</h2><button onClick={openAddMoneyItem}>Add</button></div>
                 <MoneyItemList items={moneyItems} onComplete={(id) => void completeMoneyItem(id, loadData, flash)} />
               </>
             )}
-            <div className="section-title"><h2>All transactions</h2><button onClick={() => setSheet("transaction")}>Add</button></div>
+            <div className="section-title"><h2>All transactions</h2><button onClick={openAddTransaction}>Add</button></div>
             <TransactionList transactions={transactions} full />
           </>
         )}
@@ -1096,26 +1231,30 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
         {screen === "insights" && (
           <>
             <section className="insight-hero">
-              <small>MONTHLY SUMMARY</small>
-              <strong>{money(monthSpent)}</strong>
-              <span>{monthTx.filter((t) => t.transaction_kind === "expense").length} expenses this month</span>
+              <small>{selectedMonthLabel.toUpperCase()}</small>
+              <strong>{money(selectedMonthSpent)}</strong>
+              <span>{selectedMonthTx.filter((t) => t.transaction_kind === "expense").length} expenses in {selectedMonthLabel}</span>
             </section>
             <div className="section-title"><h2>Spend by category</h2></div>
             <section className="chart-card">
-              {categoryTotals.length
-                ? categoryTotals.map(([name, value]) => (
+              {selectedMonthCategoryTotals.length
+                ? selectedMonthCategoryTotals.map(([name, value]) => (
                     <div className="bar-row" key={name}>
                       <div><span>{name}</span><b>{money(value)}</b></div>
-                      <i><em style={{ width: `${Math.max(10, (value / categoryTotals[0][1]) * 100)}%` }} /></i>
+                      <i><em style={{ width: `${Math.max(10, (value / selectedMonthCategoryTotals[0][1]) * 100)}%` }} /></i>
                     </div>
                   ))
-                : <p className="empty">Your categories will appear here.</p>}
+                : <p className="empty">Your categories will appear for {selectedMonthLabel}.</p>}
             </section>
             {monthlyTrend.length > 0 && (
               <>
                 <div className="section-title"><h2>Monthly trend</h2></div>
                 <section className="chart-card">
-                  <MonthlyTrendBars data={monthlyTrend} />
+                  <MonthlyTrendBars
+                    data={monthlyTrend}
+                    selectedMonth={activeSelectedMonthKey}
+                    onSelectMonth={setSelectedMonthKey}
+                  />
                 </section>
               </>
             )}
@@ -1150,8 +1289,8 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
             </section>
             <div className="setting-group">
               <small>PERSONAL SPACE</small>
-              <button onClick={() => setSheet("transaction")}><span>＋</span>Add transaction <b>›</b></button>
-              <button onClick={() => setSheet("money_item")}><span>⇄</span>Add Give / Get <b>›</b></button>
+              <button onClick={openAddTransaction}><span>＋</span>Add transaction <b>›</b></button>
+              <button onClick={openAddMoneyItem}><span>⇄</span>Add Give / Get <b>›</b></button>
               <button onClick={() => setScreen("insights")}><span>◔</span>View insights <b>›</b></button>
             </div>
             {/* Install app — shown only when the browser has a deferred prompt */}
@@ -1172,6 +1311,7 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
                 </button>
               </div>
             )}
+            <ThemeSetting />
             <div className="setting-group">
               <small>ACCOUNT</small>
               <button onClick={onSwitchSpace}><span>⌁</span>Switch space <b>›</b></button>
@@ -1181,8 +1321,9 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
         )}
       </div>
 
-      {/* FAB */}
-      <button className="fab" onClick={() => setSheet("transaction")} aria-label="Add transaction" style={{ display: "grid" }}>＋</button>
+      {/* The nav-add button in the bottom-nav below handles the add-transaction
+          action. No separate FAB needed — this mirrors HouseApp and avoids a
+          stray "+" rendering in the content flow. */}
 
       {/* Bottom navigation */}
       <nav className="bottom-nav">
@@ -1196,7 +1337,7 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
           <button
             key={key}
             className={screen === key ? "active" : key === "add" ? "nav-add" : ""}
-            onClick={() => key === "add" ? setSheet("transaction") : setScreen(key as PersonalScreen)}
+            onClick={() => key === "add" ? openAddTransaction() : setScreen(key as PersonalScreen)}
           >
             <i>{icon}</i>
             {label && <span>{label}</span>}
@@ -1208,21 +1349,23 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
       {sheet === "transaction" && (
         <TransactionSheet
           userId={user.id}
-          onClose={() => setSheet(null)}
-          onSaved={() => { setSheet(null); void loadData(); }}
+          editing={editingTx ?? undefined}
+          onClose={() => { setSheet(null); setEditingTx(null); }}
+          onSaved={() => { setSheet(null); setEditingTx(null); void loadData(); }}
           flash={flash}
         />
       )}
       {sheet === "money_item" && (
         <MoneyItemSheet
           userId={user.id}
-          onClose={() => setSheet(null)}
-          onSaved={() => { setSheet(null); void loadData(); }}
+          editing={editingMi ?? undefined}
+          onClose={() => { setSheet(null); setEditingMi(null); }}
+          onSaved={() => { setSheet(null); setEditingMi(null); void loadData(); }}
           flash={flash}
         />
       )}
 
-      {notice && <div className="toast">{notice}</div>}
+      {notice && <div className="toast" role="status" aria-live="polite">{notice}</div>}
     </>
   );
 }
@@ -1230,6 +1373,66 @@ function PersonalApp({ user, onSwitchSpace, onLogout }: {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
+
+type ThemeChoice = "light" | "dark" | "system";
+
+// Applies a theme choice to <html>. "system" removes the attribute so the
+// CSS @media(prefers-color-scheme) fallback takes over; explicit choices are
+// persisted so the inline layout script can restore them before paint.
+function applyThemeChoice(choice: ThemeChoice) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  try {
+    if (choice === "system") {
+      root.removeAttribute("data-theme");
+      window.localStorage.removeItem("ns-theme");
+    } else {
+      root.setAttribute("data-theme", choice);
+      window.localStorage.setItem("ns-theme", choice);
+    }
+  } catch {
+    // localStorage may be unavailable (private mode); the attribute still applies.
+    if (choice === "system") root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", choice);
+  }
+}
+
+function readThemeChoice(): ThemeChoice {
+  try {
+    const stored = window.localStorage.getItem("ns-theme");
+    if (stored === "dark" || stored === "light") return stored;
+  } catch {
+    // ignore
+  }
+  return "system";
+}
+
+// Appearance control shared by both spaces' Settings screens. Rendered as a
+// segmented control that matches the mobile settings paradigm.
+function ThemeSetting() {
+  const [choice, setChoice] = useState<ThemeChoice>(() => readThemeChoice());
+  const options: { value: ThemeChoice; label: string; icon: string }[] = [
+    { value: "light", label: "Light", icon: "☀" },
+    { value: "system", label: "System", icon: "◐" },
+    { value: "dark", label: "Dark", icon: "☾" },
+  ];
+  return (
+    <div className="setting-group">
+      <small>APPEARANCE</small>
+      <div className="theme-seg" role="group" aria-label="Theme">
+        {options.map((o) => (
+          <button
+            key={o.value}
+            aria-pressed={choice === o.value}
+            onClick={() => { setChoice(o.value); applyThemeChoice(o.value); }}
+          >
+            <i aria-hidden="true">{o.icon}</i>{o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function TransactionList({ transactions, full = false }: { transactions: PersonalTransaction[]; full?: boolean }) {
   if (!transactions.length) return <p className="empty">No transactions yet. Add your first one.</p>;
@@ -1283,15 +1486,26 @@ function MoneyItemList({ items, onComplete }: { items: MoneyItem[]; onComplete: 
   );
 }
 
-function MonthlyTrendBars({ data }: { data: [string, number][] }) {
+function MonthlyTrendBars({ data, selectedMonth, onSelectMonth }: {
+  data: [string, number][];
+  selectedMonth?: string;
+  onSelectMonth?: (month: string) => void;
+}) {
   const max = Math.max(...data.map(([, v]) => v), 1);
   return (
     <div className="monthly-trend">
       {data.map(([key, value]) => (
-        <div key={key}>
-          <span style={{ height: `${Math.max(8, (value / max) * 100)}%` }} />
+        <button
+          type="button"
+          key={key}
+          className={key === selectedMonth ? "monthly-trend-bar active" : "monthly-trend-bar"}
+          onClick={() => onSelectMonth?.(key)}
+          aria-pressed={key === selectedMonth}
+          aria-label={`${monthLabel(key)}: ${money(value)}`}
+        >
+          <span style={{ height: `${value > 0 ? Math.max(8, (value / max) * 100) : 3}%` }} />
           <small>{new Date(key + "-01T00:00:00").toLocaleDateString("en-IN", { month: "short" })}</small>
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -1302,11 +1516,14 @@ function MonthlyTrendBars({ data }: { data: [string, number][] }) {
 // ---------------------------------------------------------------------------
 const PERSONAL_CATEGORIES = ["Food", "Transport", "Bills", "Health", "Shopping", "Entertainment", "Rent", "Other"];
 
-function TransactionSheet({ userId, onClose, onSaved, flash }: {
-  userId: string; onClose: () => void; onSaved: () => void; flash: (msg: string) => void;
+function TransactionSheet({ userId, editing, onClose, onSaved, flash }: {
+  userId: string; editing?: PersonalTransaction; onClose: () => void; onSaved: () => void; flash: (msg: string) => void;
 }) {
-  const [kind, setKind] = useState<"expense" | "income">("expense");
+  const isEdit = !!editing;
+  const [kind, setKind] = useState<"expense" | "income">(editing?.transaction_kind ?? "expense");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const save = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1319,11 +1536,37 @@ function TransactionSheet({ userId, onClose, onSaved, flash }: {
     if (!description || amount <= 0) { flash("Enter a description and a positive amount."); return; }
     setSaving(true);
     const client = getSupabaseBrowserClient();
-    const { error } = await client!
-      .from("personal_transactions")
-      .insert({ user_id: userId, transaction_kind: kind, amount, category, description, notes, transaction_date: txDate });
+    // Personal rows are written direct-to-table under owner-scoped RLS; the
+    // extra .eq("user_id") is belt-and-suspenders so an update/delete can never
+    // touch another user's row even if RLS were mis-set.
+    const { error } = isEdit
+      ? await client!
+          .from("personal_transactions")
+          .update({ transaction_kind: kind, amount, category, description, notes, transaction_date: txDate })
+          .eq("id", editing!.id)
+          .eq("user_id", userId)
+      : await client!
+          .from("personal_transactions")
+          .insert({ user_id: userId, transaction_kind: kind, amount, category, description, notes, transaction_date: txDate });
     setSaving(false);
     if (error) { flash(error.message); return; }
+    flash(isEdit ? "Transaction updated." : kind === "expense" ? "Expense added." : "Income added.");
+    onSaved();
+  };
+
+  const handleDelete = async () => {
+    if (!editing) return;
+    if (!confirmDelete) { setConfirmDelete(true); return; }
+    setDeleting(true);
+    const client = getSupabaseBrowserClient();
+    const { error } = await client!
+      .from("personal_transactions")
+      .delete()
+      .eq("id", editing.id)
+      .eq("user_id", userId);
+    setDeleting(false);
+    if (error) { flash(error.message); return; }
+    flash("Transaction deleted.");
     onSaved();
   };
 
@@ -1332,7 +1575,7 @@ function TransactionSheet({ userId, onClose, onSaved, flash }: {
       <section className="sheet" onMouseDown={(e) => e.stopPropagation()}>
         <div className="sheet-handle" />
         <div className="sheet-head">
-          <h2>Add transaction</h2>
+          <h2>{isEdit ? "Edit transaction" : "Add transaction"}</h2>
           <button type="button" onClick={onClose}>×</button>
         </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -1348,16 +1591,27 @@ function TransactionSheet({ userId, onClose, onSaved, flash }: {
           >Income</button>
         </div>
         <form onSubmit={(e) => { void save(e); }}>
-          <label>Description<input name="description" placeholder="e.g. Groceries" autoFocus required /></label>
-          <label>Amount<input name="amount" type="number" inputMode="decimal" min="0.01" step="0.01" placeholder="0" required /></label>
+          <label>Description<input name="description" placeholder="e.g. Groceries" defaultValue={editing?.description} autoFocus required /></label>
+          <label>Amount<input name="amount" type="number" inputMode="decimal" min="0.01" step="0.01" placeholder="0" defaultValue={editing?.amount} required /></label>
           <label>Category
-            <select name="category">
+            <select name="category" defaultValue={editing?.category ?? "Food"}>
               {PERSONAL_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </label>
-          <label>Date<input name="transaction_date" type="date" defaultValue={todayStr()} /></label>
-          <label>Notes (optional)<input name="notes" placeholder="Any extra detail" /></label>
-          <button className="sheet-submit" type="submit" disabled={saving}>{saving ? "Saving…" : kind === "expense" ? "Add expense" : "Add income"}</button>
+          <label>Date<input name="transaction_date" type="date" defaultValue={editing?.transaction_date ?? todayStr()} /></label>
+          <label>Notes (optional)<input name="notes" placeholder="Any extra detail" defaultValue={editing?.notes ?? ""} /></label>
+          <button className="sheet-submit" type="submit" disabled={saving}>{saving ? "Saving…" : isEdit ? "Save changes" : kind === "expense" ? "Add expense" : "Add income"}</button>
+          {isEdit && (
+            <button
+              className="sheet-delete"
+              type="button"
+              onClick={() => { void handleDelete(); }}
+              disabled={deleting || saving}
+              aria-label={confirmDelete ? "Confirm delete transaction" : "Delete transaction"}
+            >
+              {deleting ? "Deleting…" : confirmDelete ? "Tap again to delete" : "Delete transaction"}
+            </button>
+          )}
         </form>
       </section>
     </div>
@@ -1367,11 +1621,14 @@ function TransactionSheet({ userId, onClose, onSaved, flash }: {
 // ---------------------------------------------------------------------------
 // Give/Get sheet — writes to personal_money_items
 // ---------------------------------------------------------------------------
-function MoneyItemSheet({ userId, onClose, onSaved, flash }: {
-  userId: string; onClose: () => void; onSaved: () => void; flash: (msg: string) => void;
+function MoneyItemSheet({ userId, editing, onClose, onSaved, flash }: {
+  userId: string; editing?: MoneyItem; onClose: () => void; onSaved: () => void; flash: (msg: string) => void;
 }) {
-  const [direction, setDirection] = useState<"give" | "get">("get");
+  const isEdit = !!editing;
+  const [direction, setDirection] = useState<"give" | "get">(editing?.direction ?? "get");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const save = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1385,11 +1642,40 @@ function MoneyItemSheet({ userId, onClose, onSaved, flash }: {
     if (!person_name || amount <= 0 || !reason) { flash("Fill in the person name, amount, and reason."); return; }
     setSaving(true);
     const client = getSupabaseBrowserClient();
-    const { error } = await client!
-      .from("personal_money_items")
-      .insert({ user_id: userId, direction, person_name, phone, amount, reason, notes, due_date, status: "pending" });
+    const { error } = isEdit
+      ? await client!
+          .from("personal_money_items")
+          .update({ direction, person_name, phone, amount, reason, notes, due_date })
+          .eq("id", editing!.id)
+          .eq("user_id", userId)
+      : await client!
+          .from("personal_money_items")
+          .insert({ user_id: userId, direction, person_name, phone, amount, reason, notes, due_date, status: "pending" });
     setSaving(false);
     if (error) { flash(error.message); return; }
+    flash(isEdit ? "Give / Get updated." : "Give / Get saved.");
+    onSaved();
+  };
+
+  const handleDelete = async () => {
+    if (!editing) return;
+    // A completed/linked item is referenced by a transaction (FK on-delete
+    // restrict) — deleting it would fail or orphan the ledger. Block clearly.
+    if (editing.status !== "pending" || editing.linked_transaction_id != null) {
+      flash("This item is already completed and linked to a transaction — it can't be deleted.");
+      return;
+    }
+    if (!confirmDelete) { setConfirmDelete(true); return; }
+    setDeleting(true);
+    const client = getSupabaseBrowserClient();
+    const { error } = await client!
+      .from("personal_money_items")
+      .delete()
+      .eq("id", editing.id)
+      .eq("user_id", userId);
+    setDeleting(false);
+    if (error) { flash(error.message); return; }
+    flash("Give / Get deleted.");
     onSaved();
   };
 
@@ -1398,7 +1684,7 @@ function MoneyItemSheet({ userId, onClose, onSaved, flash }: {
       <section className="sheet" onMouseDown={(e) => e.stopPropagation()}>
         <div className="sheet-handle" />
         <div className="sheet-head">
-          <h2>{direction === "get" ? "Money to collect" : "Money to give"}</h2>
+          <h2>{isEdit ? "Edit Give / Get" : direction === "get" ? "Money to collect" : "Money to give"}</h2>
           <button type="button" onClick={onClose}>×</button>
         </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -1414,13 +1700,24 @@ function MoneyItemSheet({ userId, onClose, onSaved, flash }: {
           >I owe them</button>
         </div>
         <form onSubmit={(e) => { void save(e); }}>
-          <label>Person name<input name="person_name" placeholder="Who?" autoFocus required /></label>
-          <label>Amount<input name="amount" type="number" inputMode="decimal" min="0.01" step="0.01" placeholder="0" required /></label>
-          <label>Reason<input name="reason" placeholder="For what?" required /></label>
-          <label>Due date (optional)<input name="due_date" type="date" /></label>
-          <label>Phone (optional)<input name="phone" inputMode="tel" placeholder="Mobile number" /></label>
-          <label>Notes (optional)<input name="notes" placeholder="Any extra detail" /></label>
-          <button className="sheet-submit" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
+          <label>Person name<input name="person_name" placeholder="Who?" defaultValue={editing?.person_name} autoFocus required /></label>
+          <label>Amount<input name="amount" type="number" inputMode="decimal" min="0.01" step="0.01" placeholder="0" defaultValue={editing?.amount} required /></label>
+          <label>Reason<input name="reason" placeholder="For what?" defaultValue={editing?.reason} required /></label>
+          <label>Due date (optional)<input name="due_date" type="date" defaultValue={editing?.due_date ?? ""} /></label>
+          <label>Phone (optional)<input name="phone" inputMode="tel" placeholder="Mobile number" defaultValue={editing?.phone ?? ""} /></label>
+          <label>Notes (optional)<input name="notes" placeholder="Any extra detail" defaultValue={editing?.notes ?? ""} /></label>
+          <button className="sheet-submit" type="submit" disabled={saving}>{saving ? "Saving…" : isEdit ? "Save changes" : "Save"}</button>
+          {isEdit && (
+            <button
+              className="sheet-delete"
+              type="button"
+              onClick={() => { void handleDelete(); }}
+              disabled={deleting || saving}
+              aria-label={confirmDelete ? "Confirm delete item" : "Delete item"}
+            >
+              {deleting ? "Deleting…" : confirmDelete ? "Tap again to delete" : "Delete item"}
+            </button>
+          )}
         </form>
       </section>
     </div>
@@ -1504,26 +1801,68 @@ function HouseHeader({ house, memberCount, myMember, isOwner, onSwitchSpace, onO
 // House sub-components
 // ---------------------------------------------------------------------------
 
-function HouseExpenseList({ expenses, members, full = false }: {
+function HouseExpenseList({ expenses, members, full = false, onEdit, canEdit }: {
   expenses: HouseExpense[];
   members: HouseMember[];
   full?: boolean;
+  onEdit?: (e: HouseExpense) => void;
+  canEdit?: (e: HouseExpense) => boolean;
 }) {
   if (!expenses.length) return <p className="empty">No expenses yet. Add the first one.</p>;
   const nameById = Object.fromEntries(members.map((m) => [m.id, m.name]));
   return (
     <div className={full ? "expense-list full" : "expense-list"}>
-      {expenses.map((e) => (
-        <div className="expense-row" key={e.id}>
-          <div className="expense-icon">{e.category.slice(0, 1).toUpperCase()}</div>
+      {expenses.map((e) => {
+        const editable = !!onEdit && (canEdit ? canEdit(e) : true);
+        const rowContent = (
+          <>
+            <div className="expense-icon">{e.category.slice(0, 1).toUpperCase()}</div>
+            <div>
+              <b>{e.title}</b>
+              <small>
+                {e.category} · Paid by {nameById[e.paid_by] ?? e.paid_by_name} ·{" "}
+                {new Date(e.expense_date + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+                {e.edited_at ? " · edited" : ""}
+              </small>
+            </div>
+            <div><b>{money(Number(e.amount))}</b></div>
+          </>
+        );
+        return editable ? (
+          <button
+            className="expense-row expense-row--tappable"
+            key={e.id}
+            onClick={() => onEdit!(e)}
+            aria-label={`Edit ${e.title}`}
+          >
+            {rowContent}
+          </button>
+        ) : (
+          <div className="expense-row" key={e.id}>{rowContent}</div>
+        );
+      })}
+    </div>
+  );
+}
+
+function HouseSettlementList({ settlements, members }: {
+  settlements: HouseSettlement[];
+  members: HouseMember[];
+}) {
+  if (!settlements.length) return <p className="empty">No settlements recorded yet.</p>;
+  const nameById = Object.fromEntries(members.map((m) => [m.id, m.name]));
+  return (
+    <div className="expense-list">
+      {settlements.map((settlement) => (
+        <div className="expense-row" key={settlement.id} style={{ gridTemplateColumns: "40px 1fr auto" }}>
+          <div className="expense-icon income">✓</div>
           <div>
-            <b>{e.title}</b>
+            <b>{nameById[settlement.from_member_id] ?? "Member"} → {nameById[settlement.to_member_id] ?? "Member"}</b>
             <small>
-              {e.category} · Paid by {nameById[e.paid_by] ?? e.paid_by_name} ·{" "}
-              {new Date(e.expense_date + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+              Settled {new Date(settlement.settled_on + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
             </small>
           </div>
-          <div><b>{money(Number(e.amount))}</b></div>
+          <div><b>{money(Number(settlement.amount))}</b></div>
         </div>
       ))}
     </div>
@@ -1539,7 +1878,7 @@ function HouseSettlementSheet({ houseId, members, myMemberId, onClose, onSaved, 
   members: HouseMember[];
   myMemberId: string;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (settlement: HouseSettlement) => void;
   flash: (msg: string) => void;
 }) {
   const [saving, setSaving] = useState(false);
@@ -1554,7 +1893,7 @@ function HouseSettlementSheet({ houseId, members, myMemberId, onClose, onSaved, 
     if (!to || amount <= 0) { flash("Choose who you paid and the amount."); return; }
     setSaving(true);
     const client = getSupabaseBrowserClient();
-    const { error } = await client!.rpc("record_house_settlement", {
+    const { data, error } = await client!.rpc("record_house_settlement", {
       input_house_id:      houseId,
       recipient_member_id: to,
       input_amount:        amount,
@@ -1562,7 +1901,8 @@ function HouseSettlementSheet({ houseId, members, myMemberId, onClose, onSaved, 
     });
     setSaving(false);
     if (error) { flash(error.message); return; }
-    onSaved();
+    if (!data) { flash("Settlement saved, but it could not be displayed yet. Please refresh."); return; }
+    onSaved(data as HouseSettlement);
   };
 
   return (

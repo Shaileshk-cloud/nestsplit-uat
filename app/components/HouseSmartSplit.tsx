@@ -27,8 +27,9 @@
  *   )
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseBrowserClient } from "@/app/lib/supabase";
+import { toPaise, fromPaise, equalSplitPaise, shareSplitPaise, percentSplitPaise } from "@/app/lib/split";
 import "./smart-split.css";
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,21 @@ export type SplitMember = {
   active: boolean;
 };
 
+// An existing expense being edited. When present the sheet switches to edit
+// mode: fields prefill from it, submit calls update_house_expense_v2, and a
+// delete action appears. Because the stored splits only record amounts (not the
+// original method), edit mode defaults to "exact" with each share prefilled —
+// always faithful to the saved split regardless of how it was first entered.
+export type EditingExpense = {
+  id: string;
+  title: string;
+  amount: number;
+  category: string;
+  expense_date: string;
+  paid_by: string;
+  splits: { member_id: string; amount: number }[];
+};
+
 export interface HouseSmartSplitProps {
   houseId: string;
   members: SplitMember[];       // only active members should be passed
@@ -47,6 +63,7 @@ export interface HouseSmartSplitProps {
   onClose: () => void;
   onSaved: () => void;
   flash: (msg: string) => void;
+  editing?: EditingExpense;     // present → edit mode
 }
 
 // ---------------------------------------------------------------------------
@@ -57,61 +74,8 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 
 type SplitMode = "equal" | "exact" | "percentage" | "shares";
 
-// ---------------------------------------------------------------------------
-// Paise helpers — all arithmetic is integer paise to avoid float drift
-// ---------------------------------------------------------------------------
-/** Round a string/number amount to integer paise. */
-function toPaise(v: number | string): number {
-  return Math.round(Number(v) * 100);
-}
-
-/** Convert paise back to a display string like "666.67". */
-function fromPaise(p: number): string {
-  return (p / 100).toFixed(2);
-}
-
-/**
- * Compute equal-split paise amounts for `n` participants on `amountPaise`.
- * The last participant absorbs any rounding remainder.
- */
-function equalSplitPaise(amountPaise: number, n: number): number[] {
-  if (n <= 0) return [];
-  const base = Math.floor(amountPaise / n);
-  const remainder = amountPaise - base * n;
-  return Array.from({ length: n }, (_, i) =>
-    i === n - 1 ? base + remainder : base,
-  );
-}
-
-/**
- * Compute share-split paise amounts for weights `ws` on `amountPaise`.
- * Last participant absorbs remainder.
- */
-function shareSplitPaise(amountPaise: number, ws: number[]): number[] {
-  const total = ws.reduce((s, w) => s + w, 0);
-  if (total <= 0) return ws.map(() => 0);
-  let allocated = 0;
-  return ws.map((w, i) => {
-    if (i === ws.length - 1) return amountPaise - allocated;
-    const share = Math.floor((amountPaise * w) / total);
-    allocated += share;
-    return share;
-  });
-}
-
-/**
- * Compute percentage-split paise amounts.
- * Last participant absorbs remainder.
- */
-function percentSplitPaise(amountPaise: number, pcts: number[]): number[] {
-  let allocated = 0;
-  return pcts.map((p, i) => {
-    if (i === pcts.length - 1) return amountPaise - allocated;
-    const share = Math.floor((amountPaise * p) / 100);
-    allocated += share;
-    return share;
-  });
-}
+// Paise split helpers live in app/lib/split.ts — shared with the unit tests
+// (split.test.ts) and mirrored server-side by the add_house_expense_v2 RPC.
 
 // ---------------------------------------------------------------------------
 // Component
@@ -123,28 +87,54 @@ export default function HouseSmartSplit({
   onClose,
   onSaved,
   flash,
+  editing,
 }: HouseSmartSplitProps) {
+  const isEdit = !!editing;
+  // Original participant ids that are still active members (inactive ones can't
+  // be represented — the RPC requires active participants — so they drop out
+  // and the user re-picks if needed).
+  const editingSelected = useMemo(() => {
+    if (!editing) return null;
+    const active = new Set(members.map((m) => m.id));
+    const kept = editing.splits.map((s) => s.member_id).filter((id) => active.has(id));
+    return kept.length > 0 ? new Set(kept) : new Set(members.map((m) => m.id));
+  }, [editing, members]);
+
   // ── Basic expense fields ──────────────────────────────────────────────────
-  const [title,    setTitle]    = useState("");
-  const [amount,   setAmount]   = useState("");
-  const [category, setCategory] = useState("Food");
-  const [date,     setDate]     = useState(todayStr());
-  const [paidBy,   setPaidBy]   = useState(myMemberId);
+  const [title,    setTitle]    = useState(editing?.title ?? "");
+  const [amount,   setAmount]   = useState(editing ? String(editing.amount) : "");
+  const [category, setCategory] = useState(editing?.category ?? "Food");
+  const [date,     setDate]     = useState(editing?.expense_date ?? todayStr());
+  const [paidBy,   setPaidBy]   = useState(
+    editing && members.some((m) => m.id === editing.paid_by) ? editing.paid_by : myMemberId,
+  );
 
   // ── Split configuration ───────────────────────────────────────────────────
-  const [mode,         setMode]         = useState<SplitMode>("equal");
-  // Selected participant IDs (start: all active members selected)
+  // Edit mode defaults to "exact" so the saved per-member amounts round-trip.
+  const [mode,         setMode]         = useState<SplitMode>(isEdit ? "exact" : "equal");
+  // Selected participant IDs (start: all active members, or the edited expense's)
   const [selected,     setSelected]     = useState<Set<string>>(
-    () => new Set(members.map((m) => m.id)),
+    () => editingSelected ?? new Set(members.map((m) => m.id)),
   );
-  // User-entered values for exact/percentage/shares modes (keyed by member id)
-  const [inputValues,  setInputValues]  = useState<Record<string, string>>({});
+  // User-entered values for exact/percentage/shares modes (keyed by member id).
+  // In edit mode we prefill the saved amounts so "exact" mode shows them.
+  const [inputValues,  setInputValues]  = useState<Record<string, string>>(() => {
+    if (!editing) return {};
+    const vals: Record<string, string> = {};
+    editing.splits.forEach((s) => { vals[s.member_id] = String(s.amount); });
+    return vals;
+  });
 
-  // ── Saving state ──────────────────────────────────────────────────────────
+  // ── Saving / deleting state ────────────────────────────────────────────────
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Reset inputValues when mode changes
+  // Reset inputValues when the split mode changes — but NOT on the initial
+  // render, so edit-mode prefilled "exact" values survive mount.
+  const didMountRef = useRef(false);
   useEffect(() => {
+    if (!didMountRef.current) { didMountRef.current = true; return; }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setInputValues({});
   }, [mode]);
@@ -261,36 +251,74 @@ export default function HouseSmartSplit({
       splitValues = selectedMembers.map((m) => parseFloat(inputValues[m.id] ?? "0") || 0);
     }
 
-    const { error } = await client.rpc("add_house_expense_v2", {
-      input_house_id:    houseId,
-      input_title:       title.trim(),
-      input_amount:      parseFloat(amount),
-      input_category:    category,
-      input_date:        date,
-      input_paid_by:     paidBy,
-      input_split_method: mode,
-      participant_ids:   selectedMembers.map((m) => m.id),
-      split_values:      splitValues,
-    });
+    const { error } = isEdit
+      ? await client.rpc("update_house_expense_v2", {
+          input_expense_id:   editing!.id,
+          input_title:        title.trim(),
+          input_amount:       parseFloat(amount),
+          input_category:     category,
+          input_date:         date,
+          input_paid_by:      paidBy,
+          input_split_method: mode,
+          participant_ids:    selectedMembers.map((m) => m.id),
+          split_values:       splitValues,
+        })
+      : await client.rpc("add_house_expense_v2", {
+          input_house_id:    houseId,
+          input_title:       title.trim(),
+          input_amount:      parseFloat(amount),
+          input_category:    category,
+          input_date:        date,
+          input_paid_by:     paidBy,
+          input_split_method: mode,
+          participant_ids:   selectedMembers.map((m) => m.id),
+          split_values:      splitValues,
+        });
 
     setSaving(false);
 
     if (error) {
-      if (process.env.NODE_ENV === "development") console.error("[add_house_expense_v2]", error);
+      if (process.env.NODE_ENV === "development") console.error(isEdit ? "[update_house_expense_v2]" : "[add_house_expense_v2]", error);
       // Map DB error messages to friendly UX copy
       const msg =
         error.message.includes("Not a house member")       ? "You are not an active member of this house." :
+        error.message.includes("creator or a house owner")  ? "Only the person who added this expense (or an owner) can change it." :
         error.message.includes("Payer is not")             ? "The selected payer is not an active member." :
         error.message.includes("participant")              ? "One or more participants are no longer active." :
         error.message.includes("must sum to the total")    ? "Split amounts don't add up to the expense total." :
         error.message.includes("Percentages must sum")     ? "Percentages must total 100%." :
         error.message.includes("share weight")             ? "At least one share weight must be greater than zero." :
         error.message.includes("positive amount")         ? "Amount must be greater than zero." :
-        "Couldn't save the expense. Please try again.";
+        error.message.includes("Expense not found")        ? "That expense no longer exists." :
+        isEdit ? "Couldn't save your changes. Please try again." : "Couldn't save the expense. Please try again.";
       flash(msg);
       return;
     }
 
+    flash(isEdit ? "Expense updated." : "Expense added.");
+    onSaved();
+  };
+
+  // ── Delete (edit mode only) ────────────────────────────────────────────────
+  const handleDelete = async () => {
+    if (!editing) return;
+    if (!confirmDelete) { setConfirmDelete(true); return; }
+    const client = getSupabaseBrowserClient();
+    if (!client) { flash("Supabase is not configured."); return; }
+    setDeleting(true);
+    const { error } = await client.rpc("delete_house_expense", { input_expense_id: editing.id });
+    setDeleting(false);
+    if (error) {
+      if (process.env.NODE_ENV === "development") console.error("[delete_house_expense]", error);
+      const msg = error.message.includes("creator or a house owner")
+        ? "Only the person who added this expense (or an owner) can delete it."
+        : error.message.includes("Expense not found")
+        ? "That expense no longer exists."
+        : "Couldn't delete the expense. Please try again.";
+      flash(msg);
+      return;
+    }
+    flash("Expense deleted.");
     onSaved();
   };
 
@@ -346,11 +374,11 @@ export default function HouseSmartSplit({
         onMouseDown={(ev) => ev.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Add expense"
+        aria-label={isEdit ? "Edit expense" : "Add expense"}
       >
         <div className="sheet-handle" />
         <div className="sheet-head">
-          <h2>Add expense</h2>
+          <h2>{isEdit ? "Edit expense" : "Add expense"}</h2>
           <button type="button" onClick={onClose} aria-label="Close">×</button>
         </div>
 
@@ -513,8 +541,21 @@ export default function HouseSmartSplit({
             disabled={!canSubmit}
             style={{ marginTop: 16 }}
           >
-            {saving ? "Saving…" : "Add expense"}
+            {saving ? "Saving…" : isEdit ? "Save changes" : "Add expense"}
           </button>
+
+          {/* ── Delete (edit mode only) — two-tap confirm ── */}
+          {isEdit && (
+            <button
+              className="sheet-delete"
+              type="button"
+              onClick={() => { void handleDelete(); }}
+              disabled={deleting || saving}
+              aria-label={confirmDelete ? "Confirm delete expense" : "Delete expense"}
+            >
+              {deleting ? "Deleting…" : confirmDelete ? "Tap again to delete" : "Delete expense"}
+            </button>
+          )}
         </form>
       </section>
     </div>

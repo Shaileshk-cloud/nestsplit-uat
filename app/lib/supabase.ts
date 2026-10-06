@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { safeNext } from "@/app/lib/url";
 
 let supabaseClient: SupabaseClient | null = null;
 
@@ -36,7 +37,7 @@ function getOAuthCallbackUrl(nextPath: string) {
   // This intentionally uses the browser's active origin: localhost in local
   // development and the current Vercel production domain after deployment.
   const callbackUrl = new URL("/auth/callback", window.location.origin);
-  callbackUrl.searchParams.set("next", nextPath.startsWith("/") && !nextPath.startsWith("//") ? nextPath : "/");
+  callbackUrl.searchParams.set("next", safeNext(nextPath));
   return callbackUrl.toString();
 }
 

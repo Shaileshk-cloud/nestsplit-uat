@@ -24,7 +24,7 @@
   height: 17px;
   padding: 0 4px;
   border-radius: 10px;
-  background: #c65348;
+  background: var(--ns-danger);
   color: #fff;
   font-size: 9px;
   font-weight: 900;
@@ -46,7 +46,7 @@
   position: absolute;
   inset: 0;
   z-index: 8;
-  background: rgba(16, 32, 22, 0.38);
+  background: var(--ns-scrim);
   display: flex;
   align-items: flex-end;
   animation: np-fade-in 180ms ease both;
@@ -80,7 +80,7 @@
   width: 36px;
   height: 4px;
   border-radius: 8px;
-  background: #d8ded5;
+  background: var(--ns-line-strong);
   margin: 10px auto 0;
   flex-shrink: 0;
 }
@@ -122,7 +122,7 @@
 /* Close ×  button */
 .np-close {
   border: 0;
-  background: #eff3ec;
+  background: var(--ns-surface-2);
   border-radius: 50%;
   height: 29px;
   width: 29px;
@@ -168,12 +168,12 @@
 
 /* Unread card has a very light green tint */
 .np-card--unread {
-  background: #f4fbf0;
+  background: var(--ns-brand-weak);
 }
 
 .np-card:active,
 .np-card:hover {
-  background: #edf5ea;
+  background: var(--ns-surface-2);
 }
 
 /* Green dot for unread */
@@ -194,7 +194,7 @@
   width: 40px;
   height: 40px;
   border-radius: 14px;
-  background: #e8f4e4;
+  background: var(--ns-brand-weak);
   display: grid;
   place-items: center;
   font-size: 20px;

@@ -1,4 +1,4 @@
-.sheet fieldset{margin:0 0 13px;padding:10px 12px;border:1px solid #dde3dc;border-radius:12px}.sheet legend{padding:0 4px;font-size:11px;color:#5d6c60;font-weight:800}.sheet label.check{display:flex;align-items:center;gap:8px;margin:8px 0;color:var(--ink)}.sheet label.check input{padding:0;accent-color:var(--green)}.house-actions{margin-top:14px}.house-actions button{font-size:15px}
+.sheet fieldset{margin:0 0 13px;padding:10px 12px;border:1px solid var(--ns-input-line);border-radius:12px}.sheet legend{padding:0 4px;font-size:11px;color:var(--muted);font-weight:800}.sheet label.check{display:flex;align-items:center;gap:8px;margin:8px 0;color:var(--ink)}.sheet label.check input{padding:0;accent-color:var(--green)}.house-actions{margin-top:14px}.house-actions button{font-size:15px}
 
 /* ==========================================================================
    House identity header
@@ -73,7 +73,7 @@
   font-weight: 900;
   letter-spacing: 0.1em;
   color: var(--green);
-  background: #e6f6da;
+  background: var(--ns-brand-weak);
   border-radius: 5px;
   padding: 2px 5px;
 }

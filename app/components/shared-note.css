@@ -1,0 +1,10 @@
+.shared-note{border:1px solid var(--line);border-radius:18px;background:var(--ns-surface);overflow:hidden}
+.shared-note-head{padding:16px 16px 12px;display:flex;gap:14px;align-items:flex-start;justify-content:space-between;border-bottom:1px solid var(--line)}
+.shared-note-head p{margin:0 0 4px;font-size:9px;font-weight:800;letter-spacing:.12em;color:var(--muted)}
+.shared-note-head h2{margin:0;font-size:17px;letter-spacing:0}
+.shared-note-status{max-width:48%;font-size:10px;line-height:1.35;text-align:right;color:var(--muted)}
+.shared-note-status.saving{color:var(--green);font-weight:700}
+.shared-note textarea{display:block;width:100%;min-height:260px;resize:vertical;border:0;outline:0;padding:16px;background:transparent;color:var(--ink);font:inherit;font-size:14px;line-height:1.6}
+.shared-note textarea::placeholder{color:var(--muted)}
+.shared-note textarea:disabled{opacity:.65}
+.shared-note-error{margin:0;padding:10px 16px;color:var(--ns-danger);background:var(--ns-surface-2);font-size:12px}
